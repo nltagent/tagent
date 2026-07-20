@@ -55,6 +55,16 @@ CREATE TABLE IF NOT EXISTS conversation_meta (
     summary             TEXT NOT NULL DEFAULT '',
     summary_updated_at  TEXT
 );
+
+CREATE TABLE IF NOT EXISTS usage_log (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at          TEXT NOT NULL,
+    provider            TEXT NOT NULL,
+    model               TEXT NOT NULL,
+    prompt_tokens       INTEGER NOT NULL DEFAULT 0,
+    completion_tokens   INTEGER NOT NULL DEFAULT 0,
+    total_tokens        INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -105,3 +115,25 @@ def query(sql: str, params: tuple = ()) -> list[sqlite3.Row]:
 def query_one(sql: str, params: tuple = ()) -> sqlite3.Row | None:
     rows = query(sql, params)
     return rows[0] if rows else None
+
+
+def log_usage(provider: str, model: str, prompt_tokens: int, completion_tokens: int, total_tokens: int) -> None:
+    execute(
+        """
+        INSERT INTO usage_log (created_at, provider, model, prompt_tokens, completion_tokens, total_tokens)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (now_iso(), provider, model, prompt_tokens, completion_tokens, total_tokens),
+    )
+
+
+def usage_today_totals() -> dict:
+    """Суммы за текущие UTC-сутки — используется командой /usage."""
+    row = query_one(
+        """
+        SELECT COUNT(*) AS requests, COALESCE(SUM(total_tokens), 0) AS tokens
+        FROM usage_log
+        WHERE date(created_at) = date('now')
+        """
+    )
+    return {"requests": row["requests"], "tokens": row["tokens"]} if row else {"requests": 0, "tokens": 0}

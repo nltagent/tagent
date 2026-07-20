@@ -1,15 +1,14 @@
 """
 Сжатие (компакция) истории диалога. Сама суммаризация требует вызова
-LLM — на этом шаге (SQLite-слой) модуля LLM ещё нет, поэтому
-summarize_fn передаётся снаружи как callback. На шаге с LLM это будет:
+LLM, поэтому summarize_fn передаётся снаружи как callback:
 
-    from llm.client import summarize_history
+    from llm.orchestrator import summarize_history
     compactor.maybe_compact(chat_id, summarize_history)
 
 Здесь же — только логика "когда" и "что" сжимать, без привязки к
 конкретному провайдеру модели.
 """
-from typing import Callable
+from typing import Callable, Optional
 
 from config import config
 from modules.memory import history
@@ -17,8 +16,9 @@ from core.logger import get_logger
 
 log = get_logger(__name__)
 
-# summarize_fn(old_summary: str, messages_to_archive: list[dict]) -> new_summary: str
-SummarizeFn = Callable[[str, list[dict]], str]
+# summarize_fn(old_summary, messages_to_archive) -> новая сводка,
+# либо None, если суммаризация не удалась (тогда компакция откладывается).
+SummarizeFn = Callable[[str, list[dict]], Optional[str]]
 
 
 def build_context(chat_id: int | str) -> tuple[str, list[dict]]:
@@ -52,6 +52,12 @@ def maybe_compact(chat_id: int | str, summarize_fn: SummarizeFn) -> bool:
     )
 
     new_summary = summarize_fn(old_summary, to_archive)
+    if new_summary is None:
+        # summarize_fn сигнализирует неудачу через None (например,
+        # LLM была недоступна) — не архивируем, чтобы не потерять эти
+        # сообщения из контекста впустую. Попробуем на следующей проверке.
+        log.warning("Компакция chat_id=%s отложена: summarize_fn вернул None", chat_id)
+        return False
     history.set_summary(chat_id, new_summary)
     history.archive_messages([m["id"] for m in to_archive])
     return True

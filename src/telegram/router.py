@@ -1,11 +1,9 @@
 """
 Разбор входящего update от Telegram и диспетчеризация команд.
 
-На этом шаге добавлены: заметки (modules.notes) и память агента +
-история диалога (modules.memory). Эхо на произвольный текст пока
-остаётся дефолтным поведением — вызов LLM появится на следующем шаге,
-но история уже пишется в БД, чтобы на шаге с LLM данные не начинать
-собирать с нуля.
+На этом шаге подключены LLM (llm.orchestrator) и поиск
+(modules.search) — обычный текст теперь идёт в модель, а не эхо.
+Заметки и память агента — как на предыдущем шаге.
 """
 from typing import Callable
 
@@ -15,6 +13,10 @@ from core.logger import get_logger
 from modules.notes import service as notes
 from modules.memory import self_memory
 from modules.memory import history as dialog_history
+from modules.search import service as search_service
+from modules.search.service import SearchError
+from storage.db import usage_today_totals
+from llm import orchestrator
 
 log = get_logger(__name__)
 
@@ -32,9 +34,11 @@ def _cmd_start(chat_id: int | str, _args: str) -> None:
         "/remember <ключ>=<значение> — запомнить факт о себе/тебе надолго\n"
         "/memory — показать, что я помню\n"
         "/forget <ключ> — забыть факт\n"
-        "/history — показать последние сообщения диалога\n\n"
-        "На любой другой текст пока отвечаю эхом — LLM подключим на "
-        "следующем шаге.",
+        "/history — показать последние сообщения диалога\n"
+        "/search <запрос> — прямой поиск в интернете (без LLM)\n"
+        "/usage — сколько токенов/запросов к LLM ушло сегодня\n\n"
+        "На любой другой текст отвечаю через LLM — при необходимости "
+        "модель сама решает, когда нужно поискать в интернете.",
     )
 
 
@@ -107,6 +111,30 @@ def _cmd_history(chat_id: int | str, _args: str) -> None:
     send_message(chat_id, "\n".join(lines))
 
 
+def _cmd_search(chat_id: int | str, args: str) -> None:
+    """Прямой поиск, в обход LLM — быстрый способ проверить, что
+    Keenable вообще отвечает, и получить сырые результаты."""
+    query = args.strip()
+    if not query:
+        send_message(chat_id, "Использование: /search запрос")
+        return
+    try:
+        results = search_service.search(query)
+    except SearchError as e:
+        send_message(chat_id, f"Поиск не удался: {e}")
+        return
+    send_message(chat_id, search_service.format_for_llm(query, results))
+
+
+def _cmd_usage(chat_id: int | str, _args: str) -> None:
+    totals = usage_today_totals()
+    send_message(
+        chat_id,
+        f"Сегодня: {totals['requests']} запросов к LLM, "
+        f"{totals['tokens']} токенов суммарно.",
+    )
+
+
 # Реестр команд вида "/command аргументы". Пополняется по мере
 # добавления модулей — каждый новый модуль просто регистрирует
 # сюда свои обработчики, не трогая остальной код.
@@ -119,6 +147,8 @@ COMMANDS: dict[str, CommandHandler] = {
     "/memory": _cmd_memory,
     "/forget": _cmd_forget,
     "/history": _cmd_history,
+    "/search": _cmd_search,
+    "/usage": _cmd_usage,
 }
 
 
@@ -127,12 +157,10 @@ def _is_owner(chat_id: int | str) -> bool:
 
 
 def _default_handler(chat_id: int | str, text: str) -> None:
-    """Пока просто эхо, но уже с записью в историю диалога — на шаге
-    с LLM здесь появится реальный вызов модели с учётом summary,
-    активной истории и self_memory.as_prompt_block()."""
-    dialog_history.record_message(chat_id, "user", text)
-    reply = f"Эхо: {text}"
-    dialog_history.record_message(chat_id, "assistant", reply)
+    """Обычный текст — реальный диалог с LLM. orchestrator сам
+    записывает историю, при необходимости запускает поиск, парсит
+    теги памяти и запускает компакцию, когда пора."""
+    reply = orchestrator.get_reply(chat_id, text)
     send_message(chat_id, reply)
 
 

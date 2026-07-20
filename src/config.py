@@ -51,5 +51,40 @@ class Config:
     # превышает это значение, самая старая часть уходит в компакцию.
     HISTORY_TOKEN_BUDGET: int = int(os.environ.get("HISTORY_TOKEN_BUDGET", "3000"))
 
+    # ── LLM (OpenRouter / clavis.to / любой OpenAI-совместимый шлюз) ──
+    LLM_API_KEY: str = _require("LLM_API_KEY")
+
+    # Полный базовый URL БЕЗ /chat/completions на конце, например:
+    #   OpenRouter:  https://openrouter.ai/api/v1
+    #   clavis.to:   уточните в личном кабинете/документации clavis.to —
+    #                на момент написания этого кода у меня нет
+    #                подтверждённого публичного адреса их API, поэтому
+    #                значение по умолчанию не задаю намеренно.
+    LLM_BASE_URL: str = _require("LLM_BASE_URL")
+
+    # Конкретная модель, например "deepseek/deepseek-chat-v3-0324:free"
+    # для OpenRouter. Указывается явно, без дефолта — списки доступных
+    # моделей и их актуальные идентификаторы меняются слишком часто,
+    # чтобы зашивать их в код.
+    LLM_MODEL: str = _require("LLM_MODEL")
+
+    # Лимиты запросов к LLM. Для OpenRouter :free-моделей — не больше
+    # 20/мин было актуально на момент написания; для других
+    # провайдеров/тарифов подберите под их документацию.
+    LLM_MAX_PER_MINUTE: int = int(os.environ.get("LLM_MAX_PER_MINUTE", "20"))
+    LLM_MIN_INTERVAL: float = float(os.environ.get("LLM_MIN_INTERVAL", "0"))
+
+    # ── Поиск (Keenable) ──
+    # Пусто — работаем в keyless-режиме (с более строгим лимитом на
+    # стороне Keenable). Если получите ключ — впишите сюда.
+    KEENABLE_API_KEY: str = os.environ.get("KEENABLE_API_KEY", "")
+
+    # См. предупреждение в .env.example — точный endpoint стоит
+    # свериться с актуальной документацией Keenable.
+    KEENABLE_BASE_URL: str = os.environ.get("KEENABLE_BASE_URL", "https://api.keenable.ai")
+
+    # Ваше стартовое ограничение: не чаще 1 запроса в 0.5 секунды.
+    KEENABLE_MIN_INTERVAL: float = float(os.environ.get("KEENABLE_MIN_INTERVAL", "0.5"))
+
 
 config = Config()
