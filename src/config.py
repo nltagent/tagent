@@ -37,5 +37,19 @@ class Config:
     # но пусть тоже будет секретным, а не просто "/webhook".
     WEBHOOK_PATH: str = os.environ.get("TELEGRAM_WEBHOOK_PATH", "/webhook")
 
+    # Путь к файлу SQLite. На Railway сюда нужно примонтировать Volume
+    # (Settings -> Volumes -> Mount Path = /data), иначе база будет
+    # пропадать при каждом передеплое контейнера.
+    DB_PATH: str = os.environ.get("DB_PATH", "/data/agent.db")
+
+    # Сколько последних (неархивированных) сообщений диалога держим
+    # в "живом" контексте, не считая порог по токенам.
+    HISTORY_KEEP_LAST: int = int(os.environ.get("HISTORY_KEEP_LAST", "20"))
+
+    # Грубый бюджет токенов на историю диалога (без system-prompt и
+    # самого нового сообщения) — когда неархивированная история
+    # превышает это значение, самая старая часть уходит в компакцию.
+    HISTORY_TOKEN_BUDGET: int = int(os.environ.get("HISTORY_TOKEN_BUDGET", "3000"))
+
 
 config = Config()
