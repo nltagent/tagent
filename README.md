@@ -98,6 +98,93 @@
 внутри `service.py`. Остального кода (router, llm.orchestrator) это
 не касается.
 
+## Деплой SearxNG как отдельного сервиса на Railway
+
+SearxNG — это отдельный, независимый контейнер, не часть образа бота.
+Нужен ещё один Railway-сервис в том же проекте:
+
+1. `searxng/Dockerfile` и `searxng/settings.yml` уже в репозитории.
+   Откройте `searxng/settings.yml` и замените `secret_key` на
+   случайную строку: `openssl rand -hex 32`.
+2. Railway → New → Empty Service (в том же проекте, где уже крутится
+   бот) → Settings → Source: подключите тот же репозиторий → Build:
+   Dockerfile Path = `searxng/Dockerfile`, Build Context = корень репо.
+3. Settings → Networking → задайте Target Port = `8080` (SearxNG
+   слушает этот порт по умолчанию). Публичный домен генерировать не
+   обязательно — бот будет достукиваться по приватной сети.
+4. После деплоя узнайте имя сервиса (по умолчанию совпадает с именем,
+   которое вы дали при создании, например `searxng`) — внутренний
+   адрес будет `http://<имя-сервиса>.railway.internal:8080` (именно
+   `http`, не `https` — трафик внутри приватной сети Railway).
+5. В переменных сервиса **бота** (не SearxNG!) задайте:
+   ```
+   SEARXNG_BASE_URL=http://<имя-сервиса>.railway.internal:8080
+   ```
+   и передеплойте бота (или просто перезапустите — Railway подхватит
+   новую переменную).
+6. Проверьте: `/setsearch searxng`, затем `/search тест`.
+
+Быстрая проверка самого SearxNG в отдельности, до подключения бота
+(с публичным доменом, если временно его включили):
+```bash
+curl -s "https://<публичный-домен-searxng>/search?q=test&format=json" | head -50
+```
+Если вернулся HTML вместо JSON — значит `settings.yml` не применился
+(проверьте, что `COPY settings.yml` действительно попал в образ —
+пересоберите сервис) или формат всё ещё не включён.
+
+## Проверка обоих контейнеров в Codespaces (без Railway)
+
+Для этого — `docker-compose.yml` в корне репозитория: поднимает бота
+и SearxNG вместе, в одной docker-сети, где они видят друг друга по
+имени сервиса (`http://searxng:8080`) — Railway-домены тут ни при чём,
+это отдельный, локальный способ проверки.
+
+1. Заполните `.env` реальными значениями (`TELEGRAM_BOT_TOKEN`,
+   `TELEGRAM_WEBHOOK_SECRET`, `OWNER_CHAT_ID`, `LLM_API_KEY`,
+   `LLM_BASE_URL`, `LLM_MODEL`). `SEARXNG_BASE_URL` можно не трогать —
+   compose сам подставит `http://searxng:8080`.
+2. В терминале Codespaces:
+   ```bash
+   docker compose up --build
+   ```
+   Соберутся оба образа, поднимутся два контейнера в одной сети.
+3. **Проверить SearxNG напрямую**, в обход бота (в отдельном
+   терминале Codespaces, порт 8081 проброшен наружу через compose):
+   ```bash
+   curl -s "http://localhost:8081/search?q=test&format=json" | head -50
+   ```
+   Должен вернуться JSON. Если HTML или 403 — проблема в самом
+   SearxNG (см. пункт выше), к боту это отношения не имеет.
+4. **Проверить бота целиком**, включая обращение к SearxNG изнутри
+   его контейнера — так же, как раньше отлаживали вебхук, curl'ом
+   прямо на `/webhook` (реальный вызов до Telegram по-настоящему
+   регистрировать не нужно — это симулирует то, что прислал бы
+   Telegram, а `sendMessage` внутри бота реально уйдёт в Telegram API,
+   так что ответ придёт вам в чат по-настоящему):
+   ```bash
+   curl -s -X POST http://localhost:8080/webhook \
+     -H "X-Telegram-Bot-Api-Secret-Token: <ваш TELEGRAM_WEBHOOK_SECRET>" \
+     -d '{"message":{"chat":{"id":<ваш OWNER_CHAT_ID>},"text":"/setsearch searxng"}}'
+
+   curl -s -X POST http://localhost:8080/webhook \
+     -H "X-Telegram-Bot-Api-Secret-Token: <ваш TELEGRAM_WEBHOOK_SECRET>" \
+     -d '{"message":{"chat":{"id":<ваш OWNER_CHAT_ID>},"text":"/search тест"}}'
+   ```
+   Если всё настроено верно — в вашем Telegram-чате с ботом появится
+   реальный ответ с результатами поиска.
+5. Логи обоих контейнеров видно прямо в терминале, где выполнили
+   `docker compose up` (либо `docker compose logs -f bot` /
+   `docker compose logs -f searxng` в отдельном терминале).
+6. Остановить: `Ctrl+C`, затем при необходимости `docker compose down`
+   (данные в `bot-data`-volume переживут остановку, `down -v` их
+   сотрёт).
+
+Когда всё проверено в Codespaces — на Railway разворачиваете как и
+раньше: бот и SearxNG отдельными сервисами, связь через
+`*.railway.internal` (см. предыдущий раздел). `docker-compose.yml`
+на Railway не используется и не нужен.
+
 ## Локальный запуск (без Railway, для проверки, что сервер вообще стартует)
 
 ```bash

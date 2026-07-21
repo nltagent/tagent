@@ -56,7 +56,11 @@ def search(query: str, max_results: int = 5, **_ignored) -> list[dict]:
     params = urllib.parse.urlencode({"q": query, "format": "json"})
     url = f"{config.SEARXNG_BASE_URL.rstrip('/')}/search?{params}"
 
-    req = urllib.request.Request(url, method="GET")
+    req = urllib.request.Request(
+        url,
+        method="GET",
+        headers={"User-Agent": "Mozilla/5.0 (compatible; telegram-agent/1.0)"},
+    )
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             raw = json.loads(resp.read().decode("utf-8"))

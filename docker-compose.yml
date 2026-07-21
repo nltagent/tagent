@@ -1,0 +1,36 @@
+# Только для локальной разработки / Codespaces. На Railway бот и
+# SearxNG — два ОТДЕЛЬНЫХ сервиса (см. README), этот файл там не
+# используется.
+#
+# Внутри одной docker-compose сети контейнеры видят друг друга по
+# имени сервиса — поэтому SEARXNG_BASE_URL=http://searxng:8080
+# (не localhost, не Railway-домен).
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    env_file: .env
+    environment:
+      # Переопределяем то, что специфично для локальной сети compose —
+      # остальное берётся из .env как есть.
+      SEARXNG_BASE_URL: http://searxng:8080
+      DB_PATH: /data/agent.db
+    ports:
+      - "8080:8080"
+    volumes:
+      - bot-data:/data
+    depends_on:
+      - searxng
+
+  searxng:
+    build:
+      context: ./searxng
+      dockerfile: Dockerfile
+    ports:
+      # Публикуем и наружу — чтобы можно было curl'ить напрямую с
+      # хоста/из Codespaces, в обход бота, для отладки.
+      - "8081:8080"
+
+volumes:
+  bot-data:
