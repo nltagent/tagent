@@ -36,6 +36,7 @@ def _cmd_start(chat_id: int | str, _args: str) -> None:
         "/forget <ключ> — забыть факт\n"
         "/history — показать последние сообщения диалога\n"
         "/search <запрос> — прямой поиск в интернете (без LLM)\n"
+        "/setsearch <keenable|searxng> — переключить провайдера поиска\n"
         "/usage — сколько токенов/запросов к LLM ушло сегодня\n\n"
         "На любой другой текст отвечаю через LLM — при необходимости "
         "модель сама решает, когда нужно поискать в интернете.",
@@ -113,7 +114,7 @@ def _cmd_history(chat_id: int | str, _args: str) -> None:
 
 def _cmd_search(chat_id: int | str, args: str) -> None:
     """Прямой поиск, в обход LLM — быстрый способ проверить, что
-    Keenable вообще отвечает, и получить сырые результаты."""
+    активный провайдер вообще отвечает, и получить сырые результаты."""
     query = args.strip()
     if not query:
         send_message(chat_id, "Использование: /search запрос")
@@ -124,6 +125,25 @@ def _cmd_search(chat_id: int | str, args: str) -> None:
         send_message(chat_id, f"Поиск не удался: {e}")
         return
     send_message(chat_id, search_service.format_for_llm(query, results))
+
+
+def _cmd_setsearch(chat_id: int | str, args: str) -> None:
+    name = args.strip()
+    if not name:
+        current = search_service.get_active_provider_name()
+        available = ", ".join(search_service.available_providers())
+        send_message(
+            chat_id,
+            f"Текущий провайдер поиска: {current}\nДоступны: {available}\n"
+            "Использование: /setsearch <имя>",
+        )
+        return
+    try:
+        search_service.set_active_provider(name)
+    except SearchError as e:
+        send_message(chat_id, str(e))
+        return
+    send_message(chat_id, f"Провайдер поиска переключён на: {name}")
 
 
 def _cmd_usage(chat_id: int | str, _args: str) -> None:
@@ -148,6 +168,7 @@ COMMANDS: dict[str, CommandHandler] = {
     "/forget": _cmd_forget,
     "/history": _cmd_history,
     "/search": _cmd_search,
+    "/setsearch": _cmd_setsearch,
     "/usage": _cmd_usage,
 }
 
