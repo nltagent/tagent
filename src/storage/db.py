@@ -65,6 +65,12 @@ CREATE TABLE IF NOT EXISTS usage_log (
     completion_tokens   INTEGER NOT NULL DEFAULT 0,
     total_tokens        INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS settings (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
 """
 
 
@@ -137,3 +143,19 @@ def usage_today_totals() -> dict:
         """
     )
     return {"requests": row["requests"], "tokens": row["tokens"]} if row else {"requests": 0, "tokens": 0}
+
+
+def get_setting(key: str, default: str | None = None) -> str | None:
+    row = query_one("SELECT value FROM settings WHERE key = ?", (key,))
+    return row["value"] if row else default
+
+
+def set_setting(key: str, value: str) -> None:
+    execute(
+        """
+        INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+                                        updated_at = excluded.updated_at
+        """,
+        (key, value, now_iso()),
+    )

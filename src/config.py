@@ -74,17 +74,26 @@ class Config:
     LLM_MAX_PER_MINUTE: int = int(os.environ.get("LLM_MAX_PER_MINUTE", "20"))
     LLM_MIN_INTERVAL: float = float(os.environ.get("LLM_MIN_INTERVAL", "0"))
 
-    # ── Поиск (Keenable) ──
-    # Пусто — работаем в keyless-режиме (с более строгим лимитом на
-    # стороне Keenable). Если получите ключ — впишите сюда.
+    # ── Поиск ──
+    # Какой провайдер использовать по умолчанию при старте контейнера.
+    # На лету можно переключить командой /setsearch — переопределяет
+    # это значение и переживает рестарт (хранится в таблице settings).
+    SEARCH_PROVIDER: str = os.environ.get("SEARCH_PROVIDER", "keenable")
+
+    # Keenable (https://docs.keenable.ai). Вопреки маркетингу "keyless",
+    # реальный REST-эндпоинт требует ключ на каждый запрос (проверено
+    # вручную curl'ом) — получите его на https://keenable.ai/console.
     KEENABLE_API_KEY: str = os.environ.get("KEENABLE_API_KEY", "")
-
-    # См. предупреждение в .env.example — точный endpoint стоит
-    # свериться с актуальной документацией Keenable.
     KEENABLE_BASE_URL: str = os.environ.get("KEENABLE_BASE_URL", "https://api.keenable.ai")
-
     # Ваше стартовое ограничение: не чаще 1 запроса в 0.5 секунды.
     KEENABLE_MIN_INTERVAL: float = float(os.environ.get("KEENABLE_MIN_INTERVAL", "0.5"))
+
+    # Self-hosted SearxNG — свой инстанс, полностью бесплатно. Укажите
+    # адрес БЕЗ /search на конце, например http://localhost:8080 или
+    # https://ваш-домен. Не забудьте включить json в search.formats
+    # в settings.yml вашего инстанса (см. modules/search/providers/searxng.py).
+    SEARXNG_BASE_URL: str = os.environ.get("SEARXNG_BASE_URL", "")
+    SEARXNG_MIN_INTERVAL: float = float(os.environ.get("SEARXNG_MIN_INTERVAL", "0"))
 
 
 config = Config()
