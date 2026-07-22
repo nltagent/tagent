@@ -21,8 +21,15 @@ from modules.search.service import SearchError
 from modules.reminders import service as reminders_service
 from modules.reminders.timeparse import parse_when, TimeParseError
 from modules.monitoring import reporter as monitoring_reporter
+from modules.github import service as github_service
+from modules.github.service import GitHubError
+from modules.github import editor as github_editor
+from modules.github.editor import EditError
 from storage.db import usage_today_totals
 from llm import orchestrator
+from llm import models as llm_models
+from llm.client import get_active_model, set_active_model
+from llm.models import ModelsError
 
 log = get_logger(__name__)
 
@@ -47,7 +54,13 @@ def _cmd_start(chat_id: int | str, _args: str) -> None:
         "/remind <когда> <текст> — напоминание, например «через 10 минут ...»\n"
         "/reminders — активные напоминания\n"
         "/delremind <id> — удалить напоминание\n"
-        "/status — состояние сервера (память/нагрузка/диск)\n\n"
+        "/status — состояние сервера (память/нагрузка/диск)\n"
+        "/models [все] — бесплатные (или все) модели провайдера\n"
+        "/setmodel <id> — переключить модель для ответов\n"
+        "/pushcode owner/repo ветка путь/файл + код на след. строках — "
+        "закоммитить готовый код в отдельную ветку на GitHub\n"
+        "/editcode owner/repo ветка + пути файлов + --- + инструкция — "
+        "модель сама перепишет файл(ы) по запросу и запушит одним коммитом\n\n"
         "На любой другой текст отвечаю через LLM — при необходимости "
         "модель сама решает, когда нужно поискать в интернете.",
     )
@@ -221,6 +234,149 @@ def _cmd_status(chat_id: int | str, _args: str) -> None:
     send_message(chat_id, monitoring_reporter.build_report())
 
 
+def _cmd_models(chat_id: int | str, args: str) -> None:
+    show_all = args.strip().lower() in ("все", "всё", "all")
+    try:
+        items = llm_models.list_models() if show_all else llm_models.list_free_models()
+    except ModelsError as e:
+        send_message(chat_id, str(e))
+        return
+    if not items:
+        send_message(
+            chat_id,
+            "Список пуст." if show_all else
+            "Бесплатных моделей не нашёл (или провайдер не публикует цены — "
+            "попробуйте /models все).",
+        )
+        return
+    lines = []
+    for m in items[:50]:  # не заваливать чат, если моделей сотни
+        mark = "🆓" if m["free"] else ("💰" if m["free"] is False else "❔")
+        lines.append(f"{mark} {m['id']}")
+    header = "Все модели" if show_all else "Бесплатные модели"
+    more = f" (показаны первые {len(lines)} из {len(items)})" if len(items) > len(lines) else ""
+    send_message(
+        chat_id,
+        f"{header}{more}:\n" + "\n".join(lines) + "\n\nВыбрать: /setmodel <id>",
+    )
+
+
+def _cmd_setmodel(chat_id: int | str, args: str) -> None:
+    model_id = args.strip()
+    if not model_id:
+        send_message(
+            chat_id,
+            f"Текущая модель: {get_active_model()}\n"
+            "Использование: /setmodel <id>\nСписок доступных: /models",
+        )
+        return
+    try:
+        known_ids = {m["id"] for m in llm_models.list_models()}
+        if model_id not in known_ids:
+            send_message(
+                chat_id,
+                f"⚠️ Не нашёл «{model_id}» в списке моделей провайдера — "
+                "всё равно переключаю, но проверьте /models на опечатки.",
+            )
+    except ModelsError:
+        pass  # не смогли свериться со списком — не блокируем переключение
+    set_active_model(model_id)
+    send_message(chat_id, f"Модель переключена на: {model_id}")
+
+
+def _cmd_pushcode(chat_id: int | str, args: str) -> None:
+    if "\n" not in args:
+        send_message(
+            chat_id,
+            "Использование (первая строка — параметры, дальше — код):\n"
+            "/pushcode owner/repo имя-ветки путь/к/файлу.py\n"
+            "<содержимое файла со следующей строки>",
+        )
+        return
+    header, _, content = args.partition("\n")
+    parts = header.split()
+    if len(parts) != 3:
+        send_message(chat_id, "Первая строка должна быть: owner/repo имя-ветки путь/к/файлу")
+        return
+    repo, branch, path = parts
+    if not content.strip():
+        send_message(chat_id, "Тело файла пустое — нечего коммитить.")
+        return
+    try:
+        result = github_service.push_file_to_branch(
+            repo, branch, path, content, message=f"Add/update {path} via Telegram bot"
+        )
+    except GitHubError as e:
+        send_message(chat_id, f"Не получилось: {e}")
+        return
+    branch_note = "новая ветка" if result["created_branch"] else "ветка уже существовала"
+    send_message(
+        chat_id,
+        f"Готово ({branch_note}).\nФайл: {result['file_html_url']}\n"
+        f"Ветка: {result['branch_url']}",
+    )
+
+
+_EDITCODE_USAGE = (
+    "Использование:\n"
+    "/editcode owner/repo имя-ветки\n"
+    "путь/к/файлу1.py\n"
+    "путь/к/файлу2.py\n"
+    "---\n"
+    "Инструкция, что изменить (можно в несколько строк)"
+)
+
+
+def _parse_editcode(args: str) -> tuple[str, str, list[str], str]:
+    lines = args.split("\n")
+    header = lines[0].split()
+    if len(header) != 2:
+        raise ValueError("Первая строка должна быть: owner/repo имя-ветки")
+    repo, branch = header
+
+    paths = []
+    i = 1
+    while i < len(lines) and lines[i].strip() != "---":
+        if lines[i].strip():
+            paths.append(lines[i].strip())
+        i += 1
+    if i >= len(lines):
+        raise ValueError("Не нашёл разделитель --- перед инструкцией")
+
+    instruction = "\n".join(lines[i + 1:]).strip()
+    if not paths:
+        raise ValueError("Укажите хотя бы один путь к файлу")
+    if not instruction:
+        raise ValueError("Не хватает инструкции после ---")
+    return repo, branch, paths, instruction
+
+
+def _cmd_editcode(chat_id: int | str, args: str) -> None:
+    if not args.strip():
+        send_message(chat_id, _EDITCODE_USAGE)
+        return
+    try:
+        repo, branch, paths, instruction = _parse_editcode(args)
+    except ValueError as e:
+        send_message(chat_id, f"{e}\n\n{_EDITCODE_USAGE}")
+        return
+
+    send_message(chat_id, f"Читаю {len(paths)} файл(ов) и прошу модель внести правки...")
+    try:
+        result = github_editor.edit_files(repo, branch, paths, instruction)
+    except EditError as e:
+        send_message(chat_id, f"Не получилось: {e}")
+        return
+
+    branch_note = "новая ветка" if result["created_branch"] else "ветка уже существовала"
+    files_list = "\n".join(f"- {p}" for p in result["files"])
+    send_message(
+        chat_id,
+        f"Готово ({branch_note}). Изменённые файлы:\n{files_list}\n\n"
+        f"Коммит: {result['commit_url']}\nВетка: {result['branch_url']}",
+    )
+
+
 # Реестр команд вида "/command аргументы". Пополняется по мере
 # добавления модулей — каждый новый модуль просто регистрирует
 # сюда свои обработчики, не трогая остальной код.
@@ -240,6 +396,10 @@ COMMANDS: dict[str, CommandHandler] = {
     "/reminders": _cmd_reminders,
     "/delremind": _cmd_delremind,
     "/status": _cmd_status,
+    "/models": _cmd_models,
+    "/setmodel": _cmd_setmodel,
+    "/pushcode": _cmd_pushcode,
+    "/editcode": _cmd_editcode,
 }
 
 

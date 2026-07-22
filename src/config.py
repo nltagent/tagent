@@ -113,5 +113,15 @@ class Config:
         os.environ.get("MONITORING_REPORT_INTERVAL_HOURS", "6")
     )
 
+    # ── GitHub (опционально) ──
+    # Fine-grained персональный токен с правами Contents: Read and
+    # write на нужный репозиторий. Пусто = навык выключен (команда
+    # /pushcode вернёт понятную ошибку, а не упадёт).
+    GITHUB_TOKEN: str = os.environ.get("GITHUB_TOKEN", "")
+
+    # Базовая ветка, от которой создаются новые (если не указана явно
+    # в команде) — обычно "main", но можно переопределить.
+    GITHUB_BASE_BRANCH: str = os.environ.get("GITHUB_BASE_BRANCH", "main")
+
 
 config = Config()

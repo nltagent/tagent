@@ -16,7 +16,7 @@ import urllib.error
 from config import config
 from core.logger import get_logger
 from core.rate_limiter import RateLimiter
-from storage.db import log_usage
+from storage.db import log_usage, get_setting, set_setting
 
 log = get_logger(__name__)
 
@@ -24,9 +24,19 @@ _limiter = RateLimiter(
     max_per_minute=config.LLM_MAX_PER_MINUTE, min_interval=config.LLM_MIN_INTERVAL
 )
 
+_MODEL_SETTING_KEY = "llm_model"
+
 
 class LLMError(RuntimeError):
     pass
+
+
+def get_active_model() -> str:
+    return get_setting(_MODEL_SETTING_KEY, config.LLM_MODEL)
+
+
+def set_active_model(model_id: str) -> None:
+    set_setting(_MODEL_SETTING_KEY, model_id)
 
 
 def _provider_name() -> str:
@@ -41,9 +51,10 @@ def _provider_name() -> str:
 def chat_completion(messages: list[dict], max_tokens: int = 1000, temperature: float = 0.7) -> str:
     """Один вызов Chat Completions. Возвращает текст ответа ассистента.
     Уважает лимит запросов и одноразовый retry по 429/Retry-After."""
+    model = get_active_model()
     url = f"{config.LLM_BASE_URL.rstrip('/')}/chat/completions"
     payload = {
-        "model": config.LLM_MODEL,
+        "model": model,
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": temperature,
@@ -85,7 +96,7 @@ def chat_completion(messages: list[dict], max_tokens: int = 1000, temperature: f
     usage = raw.get("usage", {})
     log_usage(
         provider=_provider_name(),
-        model=config.LLM_MODEL,
+        model=model,
         prompt_tokens=usage.get("prompt_tokens", 0),
         completion_tokens=usage.get("completion_tokens", 0),
         total_tokens=usage.get("total_tokens", 0),
