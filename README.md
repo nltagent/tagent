@@ -149,10 +149,19 @@ curl -s "https://<публичный-домен-searxng>/search?q=test&format=js
    docker compose up --build
    ```
    Соберутся оба образа, поднимутся два контейнера в одной сети.
-3. **Проверить SearxNG напрямую**, в обход бота (в отдельном
-   терминале Codespaces, порт 8081 проброшен наружу через compose):
+
+   Если получите `Bind for 0.0.0.0:XXXX failed: port is already allocated` —
+   значит остались контейнеры от предыдущего запуска. Почистить:
    ```bash
-   curl -s "http://localhost:8081/search?q=test&format=json" | head -50
+   docker compose down
+   # если не помогло — найти виновника и убрать вручную:
+   docker ps -a --format "table {{.ID}}\t{{.Names}}\t{{.Ports}}"
+   docker rm -f <ID>
+   ```
+3. **Проверить SearxNG напрямую**, в обход бота (в отдельном
+   терминале Codespaces, порт 18081 проброшен наружу через compose):
+   ```bash
+   curl -s "http://localhost:18081/search?q=test&format=json" | head -50
    ```
    Должен вернуться JSON. Если HTML или 403 — проблема в самом
    SearxNG (см. пункт выше), к боту это отношения не имеет.
@@ -163,11 +172,11 @@ curl -s "https://<публичный-домен-searxng>/search?q=test&format=js
    Telegram, а `sendMessage` внутри бота реально уйдёт в Telegram API,
    так что ответ придёт вам в чат по-настоящему):
    ```bash
-   curl -s -X POST http://localhost:8080/webhook \
+   curl -s -X POST http://localhost:18080/webhook \
      -H "X-Telegram-Bot-Api-Secret-Token: <ваш TELEGRAM_WEBHOOK_SECRET>" \
      -d '{"message":{"chat":{"id":<ваш OWNER_CHAT_ID>},"text":"/setsearch searxng"}}'
 
-   curl -s -X POST http://localhost:8080/webhook \
+   curl -s -X POST http://localhost:18080/webhook \
      -H "X-Telegram-Bot-Api-Secret-Token: <ваш TELEGRAM_WEBHOOK_SECRET>" \
      -d '{"message":{"chat":{"id":<ваш OWNER_CHAT_ID>},"text":"/search тест"}}'
    ```
@@ -232,8 +241,58 @@ curl http://localhost:8080/health
 6. Напишите боту `/start` — должен ответить приветствием, а на любой
    другой текст — эхом.
 
-## Что дальше
+## Шаг 4: напоминания + мониторинг сервера (Railway Cron Job)
 
-Это только скелет: заметки, память диалога, поиск, LLM, напоминания
-и мониторинг сервера будут добавляться отдельными модулями на
-следующих шагах, без изменения этой базовой части.
+Добавлено:
+- **Напоминания** (`modules/reminders`) — `/remind <когда> <текст>`,
+  `/reminders`, `/delremind <id>`. Разбор времени —
+  `modules/reminders/timeparse.py`, свой лёгкий парсер под несколько
+  русских форматов (без сторонних библиотек вроде dateutil):
+  `через N минут/часов/дней`, `завтра в HH:MM`, `сегодня в HH:MM`,
+  `HH:MM`, `ГГГГ-ММ-ДД ЧЧ:ММ`. Часовой пояс — `USER_TIMEZONE`
+  (stdlib `zoneinfo`, с учётом перехода на летнее/зимнее время).
+- **Мониторинг** (`modules/monitoring`) — память/нагрузка/диск через
+  `/proc/meminfo`, `os.getloadavg()`, `shutil.disk_usage()` — без
+  psutil. Команда `/status` — отчёт по требованию.
+- **`scheduler.py`** — то, что выполняется на каждый тик Railway Cron
+  Job: доставляет просроченные напоминания (нужно проверять часто) и
+  не чаще раза в `MONITORING_REPORT_INTERVAL_HOURS` шлёт отчёт о
+  сервере (большинство тиков его пропустят — не нужно так часто).
+- **`/internal/cron`** в `main.py` — эндпоинт, который дёргает Railway
+  Cron Job. Отдельный секрет `CRON_SECRET` (не тот же, что у вебхука
+  Telegram).
+- Единственная новая зависимость — `tzdata` (requirements.txt):
+  stdlib `zoneinfo` нужна IANA tz база, которой может не быть в
+  `python:3.12-slim`; `tzdata` — официальный pure-Python пакет именно
+  для этого случая, без скомпилированных зависимостей.
+
+### Настройка Railway Cron Job
+
+Нужен третий сервис в том же Railway-проекте (бот и SearxNG — уже два):
+
+1. Сгенерируйте секрет: `openssl rand -hex 32` → впишите в переменную
+   `CRON_SECRET` **сервиса бота** (и передеплойте бота).
+2. Railway → New → **Cron Job** (не Empty Service — именно тип Cron
+   Job, это отдельный вариант в меню создания сервиса).
+3. Command:
+   ```bash
+   curl -sf -X POST http://<имя-сервиса-бота>.railway.internal:<PORT>/internal/cron \
+     -H "X-Cron-Secret: <тот же CRON_SECRET>"
+   ```
+   `<PORT>` — тот же порт, что слушает бот (`config.PORT`, обычно то,
+   что подставляет сам Railway — посмотрите в переменных сервиса бота).
+4. Schedule: например `*/10 * * * *` (раз в 10 минут — компромисс
+   между своевременностью напоминаний и частотой пробуждения
+   контейнера бота из Serverless-сна). Минимальная частота у Railway
+   Cron — раз в 5 минут.
+5. Проверить вручную: `/remind через 1 минуту тест`, подождать тик
+   cron — должно прийти сообщение.
+
+Локально/в Codespaces тот же самый curl можно погонять руками (с
+поправкой на `localhost:18080` вместо Railway-домена, и заголовком
+`X-Cron-Secret` вместо `X-Telegram-Bot-Api-Secret-Token`), не дожидаясь
+реального расписания:
+```bash
+curl -s -X POST http://localhost:18080/internal/cron \
+  -H "X-Cron-Secret: <ваш CRON_SECRET>"
+```

@@ -1,11 +1,14 @@
 """
 Разбор входящего update от Telegram и диспетчеризация команд.
 
-На этом шаге подключены LLM (llm.orchestrator) и поиск
-(modules.search) — обычный текст теперь идёт в модель, а не эхо.
-Заметки и память агента — как на предыдущем шаге.
+Шаг 4 добавил напоминания (modules.reminders) и мониторинг сервера
+(modules.monitoring, /status) — сама доставка напоминаний и
+периодический отчёт идут через scheduler.py по тику Railway Cron Job,
+не отсюда.
 """
 from typing import Callable
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from config import config
 from telegram.api import send_message
@@ -15,6 +18,9 @@ from modules.memory import self_memory
 from modules.memory import history as dialog_history
 from modules.search import service as search_service
 from modules.search.service import SearchError
+from modules.reminders import service as reminders_service
+from modules.reminders.timeparse import parse_when, TimeParseError
+from modules.monitoring import reporter as monitoring_reporter
 from storage.db import usage_today_totals
 from llm import orchestrator
 
@@ -37,7 +43,11 @@ def _cmd_start(chat_id: int | str, _args: str) -> None:
         "/history — показать последние сообщения диалога\n"
         "/search <запрос> — прямой поиск в интернете (без LLM)\n"
         "/setsearch <keenable|searxng> — переключить провайдера поиска\n"
-        "/usage — сколько токенов/запросов к LLM ушло сегодня\n\n"
+        "/usage — сколько токенов/запросов к LLM ушло сегодня\n"
+        "/remind <когда> <текст> — напоминание, например «через 10 минут ...»\n"
+        "/reminders — активные напоминания\n"
+        "/delremind <id> — удалить напоминание\n"
+        "/status — состояние сервера (память/нагрузка/диск)\n\n"
         "На любой другой текст отвечаю через LLM — при необходимости "
         "модель сама решает, когда нужно поискать в интернете.",
     )
@@ -155,6 +165,62 @@ def _cmd_usage(chat_id: int | str, _args: str) -> None:
     )
 
 
+def _cmd_remind(chat_id: int | str, args: str) -> None:
+    if not args.strip():
+        send_message(
+            chat_id,
+            "Использование: /remind <когда> <текст>\n"
+            "Примеры:\n"
+            "/remind через 10 минут купить молоко\n"
+            "/remind завтра в 9:00 позвонить врачу\n"
+            "/remind 18:30 сделать зарядку\n"
+            "/remind 2026-07-22 09:00 встреча",
+        )
+        return
+    try:
+        due_utc, message = parse_when(args)
+    except TimeParseError as e:
+        send_message(chat_id, str(e))
+        return
+    message = message.strip()
+    if not message:
+        send_message(chat_id, "Не хватает текста напоминания после времени.")
+        return
+    reminder_id = reminders_service.add_reminder(chat_id, message, due_utc)
+    due_local = due_utc.astimezone(ZoneInfo(config.USER_TIMEZONE))
+    send_message(
+        chat_id,
+        f"Напоминание #{reminder_id} на {due_local.strftime('%Y-%m-%d %H:%M')}: {message}",
+    )
+
+
+def _cmd_reminders(chat_id: int | str, _args: str) -> None:
+    items = reminders_service.list_pending(chat_id)
+    if not items:
+        send_message(chat_id, "Активных напоминаний нет.")
+        return
+    tz = ZoneInfo(config.USER_TIMEZONE)
+    lines = []
+    for r in items:
+        due_local = datetime.fromisoformat(r["due_at"]).astimezone(tz)
+        lines.append(f"#{r['id']} {due_local.strftime('%Y-%m-%d %H:%M')}: {r['message']}")
+    send_message(chat_id, "\n".join(lines))
+
+
+def _cmd_delremind(chat_id: int | str, args: str) -> None:
+    if not args.strip().isdigit():
+        send_message(chat_id, "Использование: /delremind <id>")
+        return
+    ok = reminders_service.delete_reminder(chat_id, int(args.strip()))
+    send_message(
+        chat_id, "Удалено." if ok else "Напоминание с таким id не найдено (или уже сработало)."
+    )
+
+
+def _cmd_status(chat_id: int | str, _args: str) -> None:
+    send_message(chat_id, monitoring_reporter.build_report())
+
+
 # Реестр команд вида "/command аргументы". Пополняется по мере
 # добавления модулей — каждый новый модуль просто регистрирует
 # сюда свои обработчики, не трогая остальной код.
@@ -170,6 +236,10 @@ COMMANDS: dict[str, CommandHandler] = {
     "/search": _cmd_search,
     "/setsearch": _cmd_setsearch,
     "/usage": _cmd_usage,
+    "/remind": _cmd_remind,
+    "/reminders": _cmd_reminders,
+    "/delremind": _cmd_delremind,
+    "/status": _cmd_status,
 }
 
 

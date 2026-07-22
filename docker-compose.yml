@@ -17,7 +17,7 @@ services:
       SEARXNG_BASE_URL: http://searxng:8080
       DB_PATH: /data/agent.db
     ports:
-      - "8080:8080"
+      - "18080:8080"
     volumes:
       - bot-data:/data
     depends_on:
@@ -30,7 +30,7 @@ services:
     ports:
       # Публикуем и наружу — чтобы можно было curl'ить напрямую с
       # хоста/из Codespaces, в обход бота, для отладки.
-      - "8081:8080"
+      - "18081:8080"
 
 volumes:
   bot-data:

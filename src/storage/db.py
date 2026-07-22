@@ -71,6 +71,16 @@ CREATE TABLE IF NOT EXISTS settings (
     value       TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS reminders (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id     TEXT NOT NULL,
+    message     TEXT NOT NULL,
+    due_at      TEXT NOT NULL,   -- ISO 8601, UTC
+    created_at  TEXT NOT NULL,
+    delivered   INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders (delivered, due_at);
 """
 
 

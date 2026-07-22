@@ -95,5 +95,23 @@ class Config:
     SEARXNG_BASE_URL: str = os.environ.get("SEARXNG_BASE_URL", "")
     SEARXNG_MIN_INTERVAL: float = float(os.environ.get("SEARXNG_MIN_INTERVAL", "0"))
 
+    # ── Напоминания и мониторинг (шаг 4) ──
+    # Часовой пояс для интерпретации "завтра в 9:00" и т.п. и для
+    # отображения времени напоминаний пользователю. Используется
+    # stdlib zoneinfo — полный список зон: IANA tz database.
+    USER_TIMEZONE: str = os.environ.get("USER_TIMEZONE", "Europe/Amsterdam")
+
+    # Секрет для внутреннего эндпоинта /internal/cron, который дёргает
+    # Railway Cron Job (см. README) — не путать с TELEGRAM_WEBHOOK_SECRET,
+    # это разные вызовы с разными источниками.
+    CRON_SECRET: str = _require("CRON_SECRET")
+
+    # Не чаще раза в столько часов слать отчёт о нагрузке сервера, даже
+    # если cron дёргает эндпоинт чаще (нужно чаще ради своевременности
+    # напоминаний, но отчёт о сервере так часто не нужен).
+    MONITORING_REPORT_INTERVAL_HOURS: float = float(
+        os.environ.get("MONITORING_REPORT_INTERVAL_HOURS", "6")
+    )
+
 
 config = Config()
