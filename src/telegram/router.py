@@ -16,6 +16,7 @@ from core.logger import get_logger
 from modules.notes import service as notes
 from modules.memory import self_memory
 from modules.memory import history as dialog_history
+from modules.conversations import service as conversations
 from modules.search import service as search_service
 from modules.search.service import SearchError
 from modules.reminders import service as reminders_service
@@ -48,6 +49,9 @@ def _cmd_start(chat_id: int | str, _args: str) -> None:
         "/memory — показать, что я помню\n"
         "/forget <ключ> — забыть факт\n"
         "/history — показать последние сообщения диалога\n"
+        "/dialogs [все] — список диалогов, /newdialog — начать новый\n"
+        "/switchdialog <id> — переключиться на диалог\n"
+        "/closedialog [id] — закрыть диалог (по умолчанию текущий)\n"
         "/search <запрос> — прямой поиск в интернете (без LLM)\n"
         "/setsearch <keenable|searxng> — переключить провайдера поиска\n"
         "/usage — сколько токенов/запросов к LLM ушло сегодня\n"
@@ -122,9 +126,10 @@ def _cmd_forget(chat_id: int | str, args: str) -> None:
 
 
 def _cmd_history(chat_id: int | str, _args: str) -> None:
-    items = dialog_history.get_all_messages(chat_id, limit=20)
+    conversation_id = conversations.get_active_conversation_id(chat_id)
+    items = dialog_history.get_all_messages(conversation_id, limit=20)
     if not items:
-        send_message(chat_id, "История пуста.")
+        send_message(chat_id, "История текущего диалога пуста.")
         return
     items.reverse()
     lines = []
@@ -133,6 +138,53 @@ def _cmd_history(chat_id: int | str, _args: str) -> None:
         who = "Я" if m["role"] == "assistant" else "Ты"
         lines.append(f"{who}{tag}: {m['content']}")
     send_message(chat_id, "\n".join(lines))
+
+
+def _fmt_conversation(c: dict, active_id: int | None = None) -> str:
+    mark = "➤ " if active_id is not None and c["id"] == active_id else "  "
+    title = c["title"] or "(без названия)"
+    closed = " [закрыт]" if c.get("status") == "closed" else ""
+    return f"{mark}#{c['id']} {title}{closed} — {c['last_active_at']}"
+
+
+def _cmd_dialogs(chat_id: int | str, args: str) -> None:
+    include_closed = args.strip().lower() in ("все", "всё", "all")
+    items = conversations.list_conversations(chat_id, include_closed=include_closed)
+    if not items:
+        send_message(chat_id, "Диалогов пока нет — начните писать, и он появится сам.")
+        return
+    active_id = conversations.get_active_conversation_id(chat_id)
+    lines = [_fmt_conversation(c, active_id) for c in items]
+    hint = "\n\n/switchdialog <id>, /newdialog, /closedialog <id>"
+    send_message(chat_id, "\n".join(lines) + hint)
+
+
+def _cmd_newdialog(chat_id: int | str, _args: str) -> None:
+    conversation_id = conversations.create_conversation(chat_id)
+    send_message(chat_id, f"Начал новый диалог #{conversation_id}.")
+
+
+def _cmd_switchdialog(chat_id: int | str, args: str) -> None:
+    if not args.strip().isdigit():
+        send_message(chat_id, "Использование: /switchdialog <id> (см. /dialogs)")
+        return
+    conversation_id = int(args.strip())
+    if conversations.switch_conversation(chat_id, conversation_id):
+        conv = conversations.get_conversation(conversation_id)
+        send_message(chat_id, f"Переключился на диалог #{conversation_id} ({conv['title'] or 'без названия'}).")
+    else:
+        send_message(chat_id, "Не нашёл такой активный диалог (см. /dialogs).")
+
+
+def _cmd_closedialog(chat_id: int | str, args: str) -> None:
+    conversation_id = (
+        int(args.strip()) if args.strip().isdigit()
+        else conversations.get_active_conversation_id(chat_id)
+    )
+    if conversations.close_conversation(chat_id, conversation_id):
+        send_message(chat_id, f"Диалог #{conversation_id} закрыт.")
+    else:
+        send_message(chat_id, "Не нашёл такой активный диалог для закрытия (см. /dialogs).")
 
 
 def _cmd_search(chat_id: int | str, args: str) -> None:
@@ -389,6 +441,10 @@ COMMANDS: dict[str, CommandHandler] = {
     "/memory": _cmd_memory,
     "/forget": _cmd_forget,
     "/history": _cmd_history,
+    "/dialogs": _cmd_dialogs,
+    "/newdialog": _cmd_newdialog,
+    "/switchdialog": _cmd_switchdialog,
+    "/closedialog": _cmd_closedialog,
     "/search": _cmd_search,
     "/setsearch": _cmd_setsearch,
     "/usage": _cmd_usage,

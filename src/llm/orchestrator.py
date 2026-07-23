@@ -13,6 +13,7 @@ from core.logger import get_logger
 from llm import prompts
 from llm.client import chat_completion, LLMError
 from modules.memory import self_memory, history as dialog_history, compactor
+from modules.conversations import service as conversations
 from modules.search import service as search_service
 from modules.search.service import SearchError
 
@@ -21,8 +22,8 @@ log = get_logger(__name__)
 _SEARCH_RE = re.compile(r"\[SEARCH:\s*(.+?)\]")
 
 
-def _messages_for_llm(chat_id: int | str) -> list[dict]:
-    summary, active = compactor.build_context(chat_id)
+def _messages_for_llm(conversation_id: int) -> list[dict]:
+    summary, active = compactor.build_context(conversation_id)
     system_content = prompts.build_system_prompt()
     if summary:
         system_content += f"\n\nКраткая сводка более ранней части этого диалога:\n{summary}"
@@ -35,9 +36,13 @@ def _messages_for_llm(chat_id: int | str) -> list[dict]:
 
 
 def get_reply(chat_id: int | str, user_text: str) -> str:
-    dialog_history.record_message(chat_id, "user", user_text)
+    conversation_id = conversations.get_active_conversation_id(chat_id)
+    conversations.touch(conversation_id)
+    conversations.maybe_set_title(conversation_id, user_text)
 
-    messages = _messages_for_llm(chat_id)
+    dialog_history.record_message(chat_id, conversation_id, "user", user_text)
+
+    messages = _messages_for_llm(conversation_id)
     try:
         raw_reply = chat_completion(messages)
     except LLMError as e:
@@ -74,8 +79,8 @@ def get_reply(chat_id: int | str, user_text: str) -> str:
 
     cleaned_reply, _facts = self_memory.extract_remember_tags(raw_reply)
 
-    dialog_history.record_message(chat_id, "assistant", cleaned_reply)
-    compactor.maybe_compact(chat_id, summarize_history)
+    dialog_history.record_message(chat_id, conversation_id, "assistant", cleaned_reply)
+    compactor.maybe_compact(conversation_id, summarize_history)
 
     return cleaned_reply
 
