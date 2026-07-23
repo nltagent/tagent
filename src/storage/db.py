@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS agent_memory (
 CREATE TABLE IF NOT EXISTS messages (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     chat_id     TEXT NOT NULL,
+    conversation_id INTEGER NOT NULL DEFAULT 0,
     role        TEXT NOT NULL,       -- 'user' | 'assistant'
     content     TEXT NOT NULL,
     tokens_est  INTEGER NOT NULL,
@@ -49,12 +50,23 @@ CREATE TABLE IF NOT EXISTS messages (
     archived    INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages (chat_id, archived, id);
+CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages (conversation_id, archived, id);
 
-CREATE TABLE IF NOT EXISTS conversation_meta (
-    chat_id             TEXT PRIMARY KEY,
+-- Один диалог (ветка переписки) на запись. Summary теперь живёт прямо
+-- здесь, а не в отдельной conversation_meta (шаг 7: ветки диалогов —
+-- summary и история теперь привязаны к conversation_id, а не к chat_id
+-- напрямую, так что у одного chat_id может быть несколько диалогов).
+CREATE TABLE IF NOT EXISTS conversations (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id             TEXT NOT NULL,
+    title               TEXT NOT NULL DEFAULT '',
+    status              TEXT NOT NULL DEFAULT 'active',  -- 'active' | 'closed'
     summary             TEXT NOT NULL DEFAULT '',
-    summary_updated_at  TEXT
+    summary_updated_at  TEXT,
+    created_at          TEXT NOT NULL,
+    last_active_at      TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_conversations_chat ON conversations (chat_id, status);
 
 CREATE TABLE IF NOT EXISTS usage_log (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -94,10 +106,81 @@ def _get_conn() -> sqlite3.Connection:
         os.makedirs(os.path.dirname(config.DB_PATH), exist_ok=True)
         _conn = sqlite3.connect(config.DB_PATH, check_same_thread=False)
         _conn.row_factory = sqlite3.Row
+        # Важно: если messages уже существует (старая база) без
+        # conversation_id, добавляем колонку ДО того, как ниже
+        # выполнится SCHEMA — там есть индекс по этой колонке, а
+        # CREATE TABLE IF NOT EXISTS не добавляет колонки в уже
+        # существующую таблицу.
+        _add_conversation_id_column_if_missing(_conn)
         _conn.executescript(SCHEMA)
         _conn.commit()
+        _backfill_conversations(_conn)
         log.info("SQLite открыта: %s", config.DB_PATH)
     return _conn
+
+
+def _add_conversation_id_column_if_missing(conn: sqlite3.Connection) -> None:
+    tables = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='messages'"
+    ).fetchall()}
+    if "messages" not in tables:
+        return  # таблицы ещё нет вовсе — её создаст SCHEMA уже с нужной колонкой
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(messages)").fetchall()]
+    if "conversation_id" not in cols:
+        conn.execute("ALTER TABLE messages ADD COLUMN conversation_id INTEGER")
+        conn.commit()
+
+
+def _backfill_conversations(conn: sqlite3.Connection) -> None:
+    """Шаг 7 (ветки диалогов): в старых базах (шаги 1-6) summary лежала
+    в conversation_meta по chat_id, а сообщения не были привязаны ни к
+    какому диалогу. Здесь — одноразовый перенос: на каждый chat_id, у
+    которого есть сообщения без conversation_id, заводим один
+    "Перенесённый диалог", переносим туда summary и все сообщения, и
+    делаем его активным. На свежих базах переносить нечего — блок
+    просто ничего не найдёт и завершится сразу."""
+    orphaned_chat_ids = [
+        r[0] for r in conn.execute(
+            "SELECT DISTINCT chat_id FROM messages WHERE conversation_id IS NULL"
+        ).fetchall()
+    ]
+    if not orphaned_chat_ids:
+        return
+
+    try:
+        old_summaries = {
+            row["chat_id"]: row["summary"]
+            for row in conn.execute("SELECT chat_id, summary FROM conversation_meta").fetchall()
+        }
+    except sqlite3.OperationalError:
+        old_summaries = {}  # старой таблицы почему-то нет — не страшно
+
+    now = now_iso()
+    for chat_id in orphaned_chat_ids:
+        summary = old_summaries.get(chat_id, "")
+        cur = conn.execute(
+            """
+            INSERT INTO conversations
+                (chat_id, title, status, summary, summary_updated_at, created_at, last_active_at)
+            VALUES (?, 'Перенесённый диалог', 'active', ?, ?, ?, ?)
+            """,
+            (chat_id, summary, now if summary else None, now, now),
+        )
+        new_conv_id = cur.lastrowid
+        conn.execute(
+            "UPDATE messages SET conversation_id = ? WHERE chat_id = ? AND conversation_id IS NULL",
+            (new_conv_id, chat_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """,
+            (f"active_conversation:{chat_id}", str(new_conv_id), now),
+        )
+        log.info("Мигрирован chat_id=%s в conversation_id=%s", chat_id, new_conv_id)
+
+    conn.commit()
 
 
 @contextmanager
