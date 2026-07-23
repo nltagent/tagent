@@ -22,7 +22,7 @@ import urllib.error
 from config import config
 from core.logger import get_logger
 from core.rate_limiter import RateLimiter
-from modules.search.errors import SearchError
+from modules.search.errors import SearchError, SearchConfigError
 
 log = get_logger(__name__)
 
@@ -44,7 +44,7 @@ def _parse_response(raw: dict) -> list[dict]:
 
 def search(query: str, max_results: int = 5, **_ignored) -> list[dict]:
     if not config.SEARXNG_BASE_URL:
-        raise SearchError(
+        raise SearchConfigError(
             "SEARXNG_BASE_URL не задан — укажите адрес вашего "
             "self-hosted инстанса SearxNG (например http://localhost:8080)."
         )

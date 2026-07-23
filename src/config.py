@@ -93,7 +93,21 @@ class Config:
     # https://ваш-домен. Не забудьте включить json в search.formats
     # в settings.yml вашего инстанса (см. modules/search/providers/searxng.py).
     SEARXNG_BASE_URL: str = os.environ.get("SEARXNG_BASE_URL", "")
-    SEARXNG_MIN_INTERVAL: float = float(os.environ.get("SEARXNG_MIN_INTERVAL", "0"))
+    # Небольшая задержка по умолчанию (не 0) — на шаге 8 модель может
+    # запросить несколько поисков за один ответ, и не стоит бить по
+    # вашему инстансу вообще без пауз между запросами подряд.
+    SEARXNG_MIN_INTERVAL: float = float(os.environ.get("SEARXNG_MIN_INTERVAL", "0.3"))
+
+    # Если поиск (любой провайдер) падает с ошибкой — например,
+    # self-hosted SearxNG на Railway успел заснуть (Serverless) и не
+    # ответил с первого раза — один раз повторяем запрос после паузы.
+    # Частая причина именно "холодного старта" после сна контейнера.
+    SEARCH_RETRY_DELAY_SECONDS: float = float(os.environ.get("SEARCH_RETRY_DELAY_SECONDS", "2.5"))
+
+    # Максимум поисковых запросов, которые модель может запросить за
+    # один свой ответ (шаг 8: несколько [SEARCH: ...] в одном ответе) —
+    # защита от случайного "у меня 10 вопросов, ищу всё сразу".
+    SEARCH_MAX_QUERIES_PER_TURN: int = int(os.environ.get("SEARCH_MAX_QUERIES_PER_TURN", "3"))
 
     # ── Напоминания и мониторинг (шаг 4) ──
     # Часовой пояс для интерпретации "завтра в 9:00" и т.п. и для
