@@ -327,6 +327,43 @@ class TestSearchProviders(IsolatedDBTestCase):
         self.assertEqual(captured["method"], "GET")
         self.assertIn("format=json", captured["url"])
 
+    def test_retries_once_on_transient_failure_then_succeeds(self):
+        from modules.search import service as search_service
+        from modules.search.errors import SearchError
+
+        config.SEARCH_RETRY_DELAY_SECONDS = 0.01  # не ждать реальные 2.5с в тестах
+        attempts = {"n": 0}
+
+        def flaky(query, max_results=5, **kw):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise SearchError("временный сбой, например холодный старт")
+            return [{"title": "T", "url": "https://x", "snippet": "s"}]
+
+        search_service.set_active_provider("keenable")
+        with mock.patch.object(search_service._PROVIDERS["keenable"], "search", flaky):
+            results = search_service.search("тест")
+
+        self.assertEqual(attempts["n"], 2)
+        self.assertEqual(results[0]["title"], "T")
+
+    def test_config_errors_are_not_retried(self):
+        from modules.search import service as search_service
+        from modules.search.errors import SearchConfigError
+
+        attempts = {"n": 0}
+
+        def always_config_error(query, max_results=5, **kw):
+            attempts["n"] += 1
+            raise SearchConfigError("ключ не задан")
+
+        search_service.set_active_provider("keenable")
+        with mock.patch.object(search_service._PROVIDERS["keenable"], "search", always_config_error):
+            with self.assertRaises(SearchConfigError):
+                search_service.search("тест")
+
+        self.assertEqual(attempts["n"], 1)  # без повторной попытки
+
 
 # ────────────────────────── LLM: клиент, модели ──────────────────────────
 
@@ -441,20 +478,25 @@ class TestOrchestrator(IsolatedDBTestCase):
         self.assertNotIn("REMEMBER", reply)
         self.assertEqual(self_memory.recall_all().get("name"), "Джарвис")
 
-    def test_search_tag_triggers_second_call_with_results(self):
+    def test_search_tag_triggers_refine_then_second_call_with_results(self):
         import llm.orchestrator as orchestrator
 
-        calls = {"n": 0}
+        calls = {"main": 0, "refine": 0}
 
         def fake_chat_completion(messages, **kw):
-            calls["n"] += 1
-            if calls["n"] == 1:
+            if "Ты помогаешь сформулировать" in messages[0]["content"]:
+                calls["refine"] += 1
+                return "amsterdam weather today"
+            calls["main"] += 1
+            if calls["main"] == 1:
                 return "[SEARCH: погода в Амстердаме]"
-            # На втором вызове в истории должны быть результаты поиска
-            self.assertTrue(any("результаты поиска" in m["content"].lower() for m in messages))
+            # На финальном вызове в истории должны быть результаты поиска
+            # именно по УТОЧНЁННОМУ запросу, а не по черновому.
+            self.assertTrue(any("amsterdam weather today" in m["content"] for m in messages))
             return "Сейчас в Амстердаме облачно, 18°C."
 
         def fake_search(query, max_results=5, **kw):
+            self.assertEqual(query, "amsterdam weather today")  # именно уточнённый
             return [{"title": "Погода", "url": "https://x.example", "snippet": "18°C, облачно"}]
 
         with mock.patch.object(orchestrator, "chat_completion", fake_chat_completion), \
@@ -462,7 +504,62 @@ class TestOrchestrator(IsolatedDBTestCase):
             reply = orchestrator.get_reply(1, "какая погода в Амстердаме?")
 
         self.assertIn("18", reply)
-        self.assertEqual(calls["n"], 2)
+        self.assertIn("🔍 Искал: amsterdam weather today", reply)
+        self.assertEqual(calls["main"], 2)
+        self.assertEqual(calls["refine"], 1)
+
+    def test_multiple_search_queries_in_one_turn(self):
+        import llm.orchestrator as orchestrator
+
+        searched_queries = []
+
+        def fake_chat_completion(messages, **kw):
+            if "Ты помогаешь сформулировать" in messages[0]["content"]:
+                draft = messages[1]["content"].replace("Черновой запрос: ", "")
+                return f"{draft} (refined)"
+            last = messages[-1]["content"]
+            if "результаты поиска" in last.lower():
+                self.assertIn("погода Амстердам (refined)", last)
+                self.assertIn("курс евро (refined)", last)
+                return "Вот оба ответа сразу."
+            return "[SEARCH: погода Амстердам][SEARCH: курс евро]"
+
+        def fake_search(query, max_results=5, **kw):
+            searched_queries.append(query)
+            return [{"title": "T", "url": "https://x", "snippet": query}]
+
+        with mock.patch.object(orchestrator, "chat_completion", fake_chat_completion), \
+             mock.patch.object(orchestrator.search_service, "search", fake_search):
+            reply = orchestrator.get_reply(1, "погода и курс?")
+
+        self.assertEqual(searched_queries, ["погода Амстердам (refined)", "курс евро (refined)"])
+        self.assertIn("🔍 Искал:", reply)
+        self.assertIn("погода Амстердам (refined)", reply)
+        self.assertIn("курс евро (refined)", reply)
+
+    def test_search_queries_are_capped_per_turn(self):
+        import llm.orchestrator as orchestrator
+
+        config.SEARCH_MAX_QUERIES_PER_TURN = 2
+        refine_calls = {"n": 0}
+
+        def fake_chat_completion(messages, **kw):
+            if "Ты помогаешь сформулировать" in messages[0]["content"]:
+                refine_calls["n"] += 1
+                return f"refined-{refine_calls['n']}"
+            last = messages[-1]["content"]
+            if "результаты поиска" in last.lower():
+                return "Готово."
+            return "[SEARCH: a][SEARCH: b][SEARCH: c][SEARCH: d][SEARCH: e]"
+
+        def fake_search(query, max_results=5, **kw):
+            return [{"title": "T", "url": "https://x", "snippet": "s"}]
+
+        with mock.patch.object(orchestrator, "chat_completion", fake_chat_completion), \
+             mock.patch.object(orchestrator.search_service, "search", fake_search):
+            orchestrator.get_reply(1, "запрос с кучей вопросов")
+
+        self.assertEqual(refine_calls["n"], 2)  # не 5
 
 
 # ────────────────────────── GitHub: сервис (Contents API + Git Data API) ──────────────────────────

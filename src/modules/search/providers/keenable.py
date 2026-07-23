@@ -19,7 +19,7 @@ import urllib.error
 from config import config
 from core.logger import get_logger
 from core.rate_limiter import RateLimiter
-from modules.search.errors import SearchError
+from modules.search.errors import SearchError, SearchConfigError
 
 log = get_logger(__name__)
 
@@ -41,7 +41,7 @@ def _parse_response(raw: dict) -> list[dict]:
 
 def search(query: str, max_results: int = 5, **filters) -> list[dict]:
     if not config.KEENABLE_API_KEY:
-        raise SearchError(
+        raise SearchConfigError(
             "KEENABLE_API_KEY не задан — вопреки документации, реальный "
             "REST API Keenable требует ключ на каждый запрос. Получите "
             "его на https://keenable.ai/console."
