@@ -3,4 +3,4 @@
 # в том же Railway-проекте.
 FROM searxng/searxng:latest
 
-COPY settings.yml /etc/searxng/settings.yml
+COPY searxng/settings.yml /etc/searxng/settings.yml
