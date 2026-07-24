@@ -29,6 +29,7 @@ from modules.github.editor import EditError
 from storage.db import usage_today_totals
 from llm import orchestrator
 from llm import models as llm_models
+from llm import model_filter
 from llm.client import get_active_model, set_active_model
 from llm.models import ModelsError
 
@@ -40,33 +41,49 @@ CommandHandler = Callable[[int | str, str], None]
 def _cmd_start(chat_id: int | str, _args: str) -> None:
     send_message(
         chat_id,
-        "Привет! Я на связи.\n\n"
-        "Доступные команды:\n"
-        "/note <текст> — сохранить заметку\n"
-        "/notes — показать все заметки\n"
-        "/delnote <id> — удалить заметку\n"
-        "/remember <ключ>=<значение> — запомнить факт о себе/тебе надолго\n"
-        "/memory — показать, что я помню\n"
-        "/forget <ключ> — забыть факт\n"
-        "/history — показать последние сообщения диалога\n"
-        "/dialogs [все] — список диалогов, /newdialog — начать новый\n"
-        "/switchdialog <id> — переключиться на диалог\n"
-        "/closedialog [id] — закрыть диалог (по умолчанию текущий)\n"
-        "/search <запрос> — прямой поиск в интернете (без LLM)\n"
-        "/setsearch <keenable|searxng> — переключить провайдера поиска\n"
-        "/usage — сколько токенов/запросов к LLM ушло сегодня\n"
-        "/remind <когда> <текст> — напоминание, например «через 10 минут ...»\n"
-        "/reminders — активные напоминания\n"
-        "/delremind <id> — удалить напоминание\n"
-        "/status — состояние сервера (память/нагрузка/диск)\n"
-        "/models [все] — бесплатные (или все) модели провайдера\n"
-        "/setmodel <id> — переключить модель для ответов\n"
-        "/pushcode owner/repo ветка путь/файл + код на след. строках — "
-        "закоммитить готовый код в отдельную ветку на GitHub\n"
-        "/editcode owner/repo ветка + пути файлов + --- + инструкция — "
-        "модель сама перепишет файл(ы) по запросу и запушит одним коммитом\n\n"
+        "Привет! Я на связи. Список команд — /help.\n\n"
         "На любой другой текст отвечаю через LLM — при необходимости "
         "модель сама решает, когда нужно поискать в интернете.",
+    )
+
+
+def _cmd_help(chat_id: int | str, _args: str) -> None:
+    send_message(
+        chat_id,
+        "📝 Заметки\n"
+        "/note <текст> — сохранить\n"
+        "/notes — показать все\n"
+        "/delnote <id> — удалить\n\n"
+        "🧠 Память и диалоги\n"
+        "/remember <ключ>=<значение> — запомнить факт о себе/тебе надолго\n"
+        "/memory — что помню\n"
+        "/forget <ключ> — забыть факт\n"
+        "/history — история текущего диалога\n"
+        "/dialogs [все] — список диалогов\n"
+        "/newdialog — начать новый\n"
+        "/switchdialog <id> — переключиться\n"
+        "/closedialog [id] — закрыть (по умолчанию текущий)\n\n"
+        "🔍 Поиск\n"
+        "/search <запрос> — прямой поиск (без LLM)\n"
+        "/setsearch [keenable|searxng] — провайдер поиска\n\n"
+        "🤖 Модель\n"
+        "/models — бесплатные модели (умный анализ, с кэшем)\n"
+        "/models_free — то же самое явной командой\n"
+        "/models_all — вообще все модели с ценами\n"
+        "/setmodel <id> — переключить модель\n"
+        "/usage — расход токенов за сегодня\n\n"
+        "⏰ Напоминания\n"
+        "/remind <когда> <текст> — например «через 10 минут ...»\n"
+        "/reminders — активные\n"
+        "/delremind <id> — удалить\n\n"
+        "📊 Сервер\n"
+        "/status — память/нагрузка/диск\n\n"
+        "🐙 GitHub\n"
+        "/pushcode owner/repo ветка путь/файл + код на след. строках — "
+        "закоммитить готовый код\n"
+        "/editcode owner/repo ветка + пути файлов + --- + инструкция — "
+        "модель сама перепишет файл(ы) и запушит одним коммитом\n\n"
+        "На любой другой текст отвечаю через LLM.",
     )
 
 
@@ -286,31 +303,43 @@ def _cmd_status(chat_id: int | str, _args: str) -> None:
     send_message(chat_id, monitoring_reporter.build_report())
 
 
-def _cmd_models(chat_id: int | str, args: str) -> None:
-    show_all = args.strip().lower() in ("все", "всё", "all")
+def _fmt_model_list(items: list[dict], header: str) -> str:
+    lines = [f"🆓 {m['id']}" for m in items[:50]]
+    more = f" (показаны первые {len(lines)} из {len(items)})" if len(items) > len(lines) else ""
+    return f"{header}{more}:\n" + "\n".join(lines) + "\n\nВыбрать: /setmodel <id>"
+
+
+def _cmd_models_free(chat_id: int | str, args: str) -> None:
+    """Бесплатные модели — "умный" анализ через LLM (llm/model_filter.py),
+    с кэшем на config.FREE_MODELS_CACHE_HOURS часов. Работает независимо
+    от того, как именно провайдер оформляет цену в ответе /models."""
+    force_refresh = args.strip().lower() in ("обновить", "refresh")
     try:
-        items = llm_models.list_models() if show_all else llm_models.list_free_models()
+        items = model_filter.classify_free_models(force_refresh=force_refresh)
     except ModelsError as e:
         send_message(chat_id, str(e))
         return
     if not items:
-        send_message(
-            chat_id,
-            "Список пуст." if show_all else
-            "Бесплатных моделей не нашёл (или провайдер не публикует цены — "
-            "попробуйте /models все).",
-        )
+        send_message(chat_id, "Бесплатных моделей не нашёл (или анализ не смог определить).")
+        return
+    send_message(chat_id, _fmt_model_list(items, "Бесплатные модели"))
+
+
+def _cmd_models_all(chat_id: int | str, _args: str) -> None:
+    try:
+        items = llm_models.list_models()
+    except ModelsError as e:
+        send_message(chat_id, str(e))
+        return
+    if not items:
+        send_message(chat_id, "Список пуст.")
         return
     lines = []
-    for m in items[:50]:  # не заваливать чат, если моделей сотни
+    for m in items[:50]:
         mark = "🆓" if m["free"] else ("💰" if m["free"] is False else "❔")
         lines.append(f"{mark} {m['id']}")
-    header = "Все модели" if show_all else "Бесплатные модели"
     more = f" (показаны первые {len(lines)} из {len(items)})" if len(items) > len(lines) else ""
-    send_message(
-        chat_id,
-        f"{header}{more}:\n" + "\n".join(lines) + "\n\nВыбрать: /setmodel <id>",
-    )
+    send_message(chat_id, f"Все модели{more}:\n" + "\n".join(lines) + "\n\nВыбрать: /setmodel <id>")
 
 
 def _cmd_setmodel(chat_id: int | str, args: str) -> None:
@@ -434,6 +463,7 @@ def _cmd_editcode(chat_id: int | str, args: str) -> None:
 # сюда свои обработчики, не трогая остальной код.
 COMMANDS: dict[str, CommandHandler] = {
     "/start": _cmd_start,
+    "/help": _cmd_help,
     "/note": _cmd_note,
     "/notes": _cmd_notes,
     "/delnote": _cmd_delnote,
@@ -452,7 +482,9 @@ COMMANDS: dict[str, CommandHandler] = {
     "/reminders": _cmd_reminders,
     "/delremind": _cmd_delremind,
     "/status": _cmd_status,
-    "/models": _cmd_models,
+    "/models": _cmd_models_free,
+    "/models_free": _cmd_models_free,
+    "/models_all": _cmd_models_all,
     "/setmodel": _cmd_setmodel,
     "/pushcode": _cmd_pushcode,
     "/editcode": _cmd_editcode,

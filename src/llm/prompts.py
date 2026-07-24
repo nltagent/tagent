@@ -4,6 +4,9 @@
 llm/orchestrator.py, поэтому формулировки здесь и код парсинга там
 должны оставаться согласованными.
 """
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from config import config
 from modules.memory import self_memory
 
@@ -24,6 +27,10 @@ BASE_INSTRUCTIONS = (
     "выполнит поиск и вернёт тебе результаты отдельным сообщением, "
     "после чего ты дашь окончательный ответ пользователю на их "
     "основе.\n\n"
+    "Текущие дата и время (тебе НЕ нужно искать это в интернете или "
+    "уточнять — это точное значение прямо сейчас, используй его для "
+    "любых вопросов со словами «сегодня», «сейчас», «завтра» и т.п.): "
+    "{current_datetime}.\n\n"
     "Если пользователь просит запомнить факт о себе или о тебе "
     "надолго (например, дал тебе имя) — добавь в конец своего ответа "
     "строку вида [REMEMBER: ключ=значение]. Она не показывается "
@@ -32,9 +39,21 @@ BASE_INSTRUCTIONS = (
 )
 
 
+def _current_datetime_str() -> str:
+    now = datetime.now(ZoneInfo(config.USER_TIMEZONE))
+    # Пример: "четверг, 24 июля 2026, 14:05 (Europe/Amsterdam)" — но без
+    # локализации дня недели/месяца в stdlib, чтобы не тащить лишнее;
+    # обычный ISO-подобный формат модель прекрасно понимает и так.
+    return f"{now.strftime('%Y-%m-%d %H:%M')} ({config.USER_TIMEZONE}, {now.strftime('%A')})"
+
+
 def build_system_prompt() -> str:
     memory_block = self_memory.as_prompt_block()
-    base = BASE_INSTRUCTIONS.replace("{max_queries}", str(config.SEARCH_MAX_QUERIES_PER_TURN))
+    base = (
+        BASE_INSTRUCTIONS
+        .replace("{max_queries}", str(config.SEARCH_MAX_QUERIES_PER_TURN))
+        .replace("{current_datetime}", _current_datetime_str())
+    )
     if memory_block:
         return f"{base}\n\n{memory_block}"
     return base
