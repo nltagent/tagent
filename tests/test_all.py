@@ -446,6 +446,106 @@ class TestLLMClientAndModels(IsolatedDBTestCase):
         set_active_model("some/other-model")
         self.assertEqual(get_active_model(), "some/other-model")
 
+    def test_price_hints_capture_nonstandard_fields(self):
+        import llm.models as llm_models
+
+        def fake_urlopen(req, timeout=15):
+            payload = {
+                "data": [
+                    {"id": "clavis/a", "name": "A", "cost_rub_per_1k": 0, "description": "irrelevant"},
+                    {"id": "clavis/b", "name": "B", "cost_rub_per_1k": 1.5},
+                ]
+            }
+            return FakeResponse(json.dumps(payload).encode())
+
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            hints = llm_models.list_price_hints()
+
+        self.assertEqual(len(hints), 2)
+        self.assertIn("cost_rub_per_1k", hints[0])
+        self.assertNotIn("description", hints[0])  # только id + ценовые поля
+
+
+# ────────────────────────── "Умное" определение бесплатных моделей ──────────────────────────
+
+class TestModelFilter(IsolatedDBTestCase):
+    def test_classifies_nonstandard_pricing_field_via_llm(self):
+        import llm.model_filter as model_filter
+
+        def fake_urlopen(req, timeout=15):
+            payload = {
+                "data": [
+                    {"id": "clavis/free-one", "name": "Free one", "cost_rub_per_1k": 0},
+                    {"id": "clavis/paid-one", "name": "Paid one", "cost_rub_per_1k": 2},
+                ]
+            }
+            return FakeResponse(json.dumps(payload).encode())
+
+        def fake_chat_completion(messages, **kw):
+            payload = json.loads(messages[1]["content"])
+            self.assertIn("cost_rub_per_1k", payload[0])
+            return "clavis/free-one"
+
+        with mock.patch("urllib.request.urlopen", fake_urlopen), \
+             mock.patch.object(model_filter, "chat_completion", fake_chat_completion):
+            result = model_filter.classify_free_models()
+
+        self.assertEqual([m["id"] for m in result], ["clavis/free-one"])
+
+    def test_result_is_cached_until_ttl_or_force_refresh(self):
+        import llm.model_filter as model_filter
+
+        fetch_calls = {"n": 0}
+
+        def fake_urlopen(req, timeout=15):
+            fetch_calls["n"] += 1
+            payload = {"data": [{"id": "a/free:free", "name": "A"}]}
+            return FakeResponse(json.dumps(payload).encode())
+
+        with mock.patch("urllib.request.urlopen", fake_urlopen), \
+             mock.patch.object(model_filter, "chat_completion", lambda messages, **kw: "a/free:free"):
+            model_filter.classify_free_models()
+            model_filter.classify_free_models()  # из кэша, без новых вызовов
+            self.assertEqual(fetch_calls["n"], 1)
+
+            model_filter.classify_free_models(force_refresh=True)
+            self.assertEqual(fetch_calls["n"], 2)
+
+    def test_falls_back_to_heuristic_when_llm_fails(self):
+        import llm.model_filter as model_filter
+        from llm.client import LLMError
+
+        def fake_urlopen(req, timeout=15):
+            payload = {
+                "data": [
+                    {"id": "a/free:free", "name": "A"},
+                    {"id": "b/paid", "name": "B", "pricing": {"prompt": "0.1", "completion": "0.2"}},
+                ]
+            }
+            return FakeResponse(json.dumps(payload).encode())
+
+        def failing_chat_completion(messages, **kw):
+            raise LLMError("модель недоступна")
+
+        with mock.patch("urllib.request.urlopen", fake_urlopen), \
+             mock.patch.object(model_filter, "chat_completion", failing_chat_completion):
+            result = model_filter.classify_free_models()
+
+        self.assertEqual([m["id"] for m in result], ["a/free:free"])  # эвристика по :free
+
+
+# ────────────────────────── Системный промпт: дата/время ──────────────────────────
+
+class TestPrompts(unittest.TestCase):
+    def test_system_prompt_includes_current_datetime(self):
+        import llm.prompts as prompts
+        from datetime import datetime
+
+        prompt = prompts.build_system_prompt()
+        self.assertIn("Текущие дата и время", prompt)
+        self.assertIn(str(datetime.now().year), prompt)
+        self.assertIn(config.USER_TIMEZONE, prompt)
+
 
 # ────────────────────────── LLM: оркестратор (REMEMBER + SEARCH теги) ──────────────────────────
 
@@ -876,6 +976,39 @@ class TestRouterCommands(IsolatedDBTestCase):
         self.router.handle_update(self._upd("/note купить хлеб"))
         self.router.handle_update(self._upd("/notes"))
         self.assertTrue(any("купить хлеб" in t for _, t in self.sent))
+
+    def test_help_lists_grouped_commands(self):
+        self.router.handle_update(self._upd("/help"))
+        text = self.sent[-1][1]
+        self.assertIn("/note", text)
+        self.assertIn("/remind", text)
+        self.assertIn("/pushcode", text)
+        self.assertIn("/models_all", text)
+        # /start сам по себе должен остаться коротким и не дублировать /help
+        self.sent.clear()
+        self.router.handle_update(self._upd("/start"))
+        start_text = self.sent[-1][1]
+        self.assertLess(len(start_text), len(text))
+
+    def test_models_all_and_models_free_commands(self):
+        def fake_urlopen(req, timeout=15):
+            payload = {"data": [
+                {"id": "a/free:free", "name": "A"},
+                {"id": "b/paid", "name": "B", "pricing": {"prompt": "0.1", "completion": "0.2"}},
+            ]}
+            return FakeResponse(json.dumps(payload).encode())
+
+        with mock.patch("urllib.request.urlopen", fake_urlopen), \
+             mock.patch.object(self.router.model_filter, "chat_completion", lambda m, **kw: "a/free:free"):
+            self.router.handle_update(self._upd("/models_all"))
+            self.router.handle_update(self._upd("/models_free"))
+            self.router.handle_update(self._upd("/models"))
+
+        all_text, free_text, models_text = (t for _, t in self.sent[-3:])
+        self.assertIn("b/paid", all_text)
+        self.assertNotIn("b/paid", free_text)
+        self.assertIn("a/free:free", free_text)
+        self.assertEqual(free_text, models_text)  # /models — алиас /models_free
 
     def test_reminders_flow(self):
         self.router.handle_update(self._upd("/remind через 5 минут проверить почту"))
