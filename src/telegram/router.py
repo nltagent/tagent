@@ -26,10 +26,13 @@ from modules.github import service as github_service
 from modules.github.service import GitHubError
 from modules.github import editor as github_editor
 from modules.github.editor import EditError
+from modules.diagnostics import service as diagnostics
 from storage.db import usage_today_totals
 from llm import orchestrator
 from llm import models as llm_models
 from llm import model_filter
+from llm import providers as llm_providers
+from llm.providers import ProviderError
 from llm.client import get_active_model, set_active_model
 from llm.models import ModelsError
 
@@ -71,13 +74,17 @@ def _cmd_help(chat_id: int | str, _args: str) -> None:
         "/models_free — то же самое явной командой\n"
         "/models_all — вообще все модели с ценами\n"
         "/setmodel <id> — переключить модель\n"
-        "/usage — расход токенов за сегодня\n\n"
+        "/usage — расход токенов за сегодня\n"
+        "/addprovider имя url ключ [модель] — добавить ключ другого агрегатора\n"
+        "/providers — список профилей, /setprovider <имя> — переключить\n"
+        "/delprovider <имя> — удалить профиль\n\n"
         "⏰ Напоминания\n"
         "/remind <когда> <текст> — например «через 10 минут ...»\n"
         "/reminders — активные\n"
         "/delremind <id> — удалить\n\n"
         "📊 Сервер\n"
-        "/status — память/нагрузка/диск\n\n"
+        "/status — память/нагрузка/диск\n"
+        "/selftest — живая самопроверка всех навыков на реальных вызовах\n\n"
         "🐙 GitHub\n"
         "/pushcode owner/repo ветка путь/файл + код на след. строках — "
         "закоммитить готовый код\n"
@@ -303,6 +310,15 @@ def _cmd_status(chat_id: int | str, _args: str) -> None:
     send_message(chat_id, monitoring_reporter.build_report())
 
 
+def _cmd_selftest(chat_id: int | str, _args: str) -> None:
+    send_message(
+        chat_id,
+        "Запускаю самопроверку — реальные вызовы к LLM и поиску, "
+        "может занять несколько секунд...",
+    )
+    send_message(chat_id, diagnostics.run_selftest())
+
+
 def _fmt_model_list(items: list[dict], header: str) -> str:
     lines = [f"🆓 {m['id']}" for m in items[:50]]
     more = f" (показаны первые {len(lines)} из {len(items)})" if len(items) > len(lines) else ""
@@ -363,6 +379,67 @@ def _cmd_setmodel(chat_id: int | str, args: str) -> None:
         pass  # не смогли свериться со списком — не блокируем переключение
     set_active_model(model_id)
     send_message(chat_id, f"Модель переключена на: {model_id}")
+
+
+def _cmd_addprovider(chat_id: int | str, args: str) -> None:
+    parts = args.split(maxsplit=3)
+    if len(parts) < 3:
+        send_message(
+            chat_id,
+            "Использование: /addprovider имя base_url api_key [модель_по_умолчанию]\n"
+            "Пример: /addprovider clavis https://api.clavis.to/v1 sk-xxxxx\n\n"
+            "⚠️ Ключ будет храниться в базе бота (тот же уровень защиты, "
+            "что и .env), и это сообщение с ключом останется в истории "
+            "чата с Telegram — при желании удалите его там вручную после.",
+        )
+        return
+    name, base_url, api_key = parts[0], parts[1], parts[2]
+    default_model = parts[3] if len(parts) > 3 else ""
+    try:
+        llm_providers.add_profile(name, base_url, api_key, default_model)
+    except ProviderError as e:
+        send_message(chat_id, str(e))
+        return
+    send_message(
+        chat_id,
+        f"Профиль «{name}» добавлен. Переключиться: /setprovider {name}",
+    )
+
+
+def _cmd_providers(chat_id: int | str, _args: str) -> None:
+    active = llm_providers.get_active_profile_name()
+    names = llm_providers.list_profile_names()
+    lines = [f"{'➤ ' if n == active else '  '}{n}" for n in names]
+    send_message(
+        chat_id,
+        "Профили LLM-провайдеров:\n" + "\n".join(lines) +
+        "\n\n/setprovider <имя>, /addprovider, /delprovider <имя>",
+    )
+
+
+def _cmd_setprovider(chat_id: int | str, args: str) -> None:
+    name = args.strip()
+    if not name:
+        send_message(chat_id, f"Текущий профиль: {llm_providers.get_active_profile_name()}\n"
+                     "Использование: /setprovider <имя> (см. /providers)")
+        return
+    try:
+        llm_providers.set_active_profile(name)
+    except ProviderError as e:
+        send_message(chat_id, str(e))
+        return
+    send_message(chat_id, f"Профиль переключён на: {name} (модель: {get_active_model()})")
+
+
+def _cmd_delprovider(chat_id: int | str, args: str) -> None:
+    name = args.strip()
+    if not name:
+        send_message(chat_id, "Использование: /delprovider <имя>")
+        return
+    if llm_providers.remove_profile(name):
+        send_message(chat_id, f"Профиль «{name}» удалён.")
+    else:
+        send_message(chat_id, f"Профиль «{name}» не найден (нельзя удалить «default»).")
 
 
 def _cmd_pushcode(chat_id: int | str, args: str) -> None:
@@ -482,10 +559,15 @@ COMMANDS: dict[str, CommandHandler] = {
     "/reminders": _cmd_reminders,
     "/delremind": _cmd_delremind,
     "/status": _cmd_status,
+    "/selftest": _cmd_selftest,
     "/models": _cmd_models_free,
     "/models_free": _cmd_models_free,
     "/models_all": _cmd_models_all,
     "/setmodel": _cmd_setmodel,
+    "/addprovider": _cmd_addprovider,
+    "/providers": _cmd_providers,
+    "/setprovider": _cmd_setprovider,
+    "/delprovider": _cmd_delprovider,
     "/pushcode": _cmd_pushcode,
     "/editcode": _cmd_editcode,
 }

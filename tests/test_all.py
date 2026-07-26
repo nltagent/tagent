@@ -547,6 +547,151 @@ class TestPrompts(unittest.TestCase):
         self.assertIn(config.USER_TIMEZONE, prompt)
 
 
+# ────────────────────────── Несколько профилей LLM-провайдеров ──────────────────────────
+
+class TestProviders(IsolatedDBTestCase):
+    def test_default_profile_uses_config(self):
+        from llm import providers
+
+        self.assertEqual(providers.list_profile_names(), ["default"])
+        self.assertEqual(providers.get_active_profile_name(), "default")
+        self.assertEqual(
+            providers.get_active_credentials(), (config.LLM_BASE_URL, config.LLM_API_KEY)
+        )
+
+    def test_add_switch_and_remove_profile(self):
+        from llm import providers
+
+        providers.add_profile("clavis", "https://api.clavis.to/v1", "sk-123", "clavis/model-x")
+        self.assertIn("clavis", providers.list_profile_names())
+
+        providers.set_active_profile("clavis")
+        self.assertEqual(providers.get_active_profile_name(), "clavis")
+        self.assertEqual(
+            providers.get_active_credentials(), ("https://api.clavis.to/v1", "sk-123")
+        )
+
+        self.assertTrue(providers.remove_profile("clavis"))
+        # Удалили активный профиль -> откат на default
+        self.assertEqual(providers.get_active_profile_name(), "default")
+
+    def test_cannot_overwrite_or_switch_to_unknown(self):
+        from llm import providers
+        from llm.providers import ProviderError
+
+        with self.assertRaises(ProviderError):
+            providers.add_profile("default", "https://x", "key")
+        with self.assertRaises(ProviderError):
+            providers.set_active_profile("does-not-exist")
+
+    def test_model_is_remembered_per_profile(self):
+        from llm import providers
+        from llm.client import get_active_model, set_active_model
+
+        default_model = get_active_model()
+        providers.add_profile("clavis", "https://api.clavis.to/v1", "sk-123", "clavis/default")
+        providers.set_active_profile("clavis")
+        self.assertEqual(get_active_model(), "clavis/default")
+
+        set_active_model("clavis/other")
+        self.assertEqual(get_active_model(), "clavis/other")
+
+        providers.set_active_profile("default")
+        self.assertEqual(get_active_model(), default_model)  # не перепуталось с clavis
+
+        providers.set_active_profile("clavis")
+        self.assertEqual(get_active_model(), "clavis/other")  # не потерялось
+
+    def test_chat_completion_uses_active_profile_credentials(self):
+        from llm import providers
+        from llm.client import chat_completion
+
+        providers.add_profile("clavis", "https://api.clavis.to/v1", "sk-clavis", "clavis/m")
+        providers.set_active_profile("clavis")
+
+        captured = {}
+
+        def fake_urlopen(req, timeout=60):
+            captured["url"] = req.full_url
+            captured["auth"] = req.headers.get("Authorization")
+            payload = {"choices": [{"message": {"content": "ok"}}], "usage": {}}
+            return FakeResponse(json.dumps(payload).encode())
+
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            chat_completion([{"role": "user", "content": "hi"}])
+
+        self.assertTrue(captured["url"].startswith("https://api.clavis.to/v1"))
+        self.assertEqual(captured["auth"], "Bearer sk-clavis")
+
+    def test_router_provider_commands(self):
+        import telegram.router as router
+        sent = []
+        with mock.patch.object(
+            router, "send_message", lambda chat_id, text, **kw: sent.append(text)
+        ):
+            router.handle_update({"message": {"chat": {"id": 1}, "text": "/addprovider"}})
+            router.handle_update({
+                "message": {"chat": {"id": 1},
+                            "text": "/addprovider clavis https://api.clavis.to/v1 sk-1 clavis/m"}
+            })
+            router.handle_update({"message": {"chat": {"id": 1}, "text": "/providers"}})
+            router.handle_update({"message": {"chat": {"id": 1}, "text": "/setprovider clavis"}})
+            router.handle_update({"message": {"chat": {"id": 1}, "text": "/setprovider nope"}})
+            router.handle_update({"message": {"chat": {"id": 1}, "text": "/delprovider clavis"}})
+
+        self.assertTrue(any("Использование" in t for t in sent))
+        self.assertTrue(any("добавлен" in t for t in sent))
+        self.assertTrue(any("➤ default" in t for t in sent))
+        self.assertTrue(any("переключён на: clavis" in t for t in sent))
+        self.assertTrue(any("не найден" in t for t in sent))
+        self.assertTrue(any("удалён" in t for t in sent))
+
+
+# ────────────────────────── Живая самопроверка ──────────────────────────
+
+class TestDiagnostics(IsolatedDBTestCase):
+    def test_selftest_reports_ok_for_each_working_check(self):
+        import modules.diagnostics.service as diagnostics
+
+        config.GITHUB_TOKEN = ""  # тестовое окружение обычно задаёт токен глобально — тут проверяем путь "не настроено"
+        with mock.patch("llm.client.chat_completion", lambda messages, **kw: "тест"), \
+             mock.patch("modules.search.service.search", lambda q, max_results=5, **kw: [{"title": "T"}]), \
+             mock.patch("modules.search.service.get_active_provider_name", lambda: "keenable"):
+            report = diagnostics.run_selftest()
+
+        self.assertIn("✅ База данных", report)
+        self.assertIn("✅ LLM", report)
+        self.assertIn("✅ Поиск", report)
+        self.assertIn("⏭️ GitHub", report)  # токен не задан
+        self.assertIn("✅ Мониторинг сервера", report)
+
+    def test_selftest_github_check_when_configured(self):
+        import modules.diagnostics.service as diagnostics
+
+        config.GITHUB_TOKEN = "ghp_test"
+        with mock.patch("llm.client.chat_completion", lambda messages, **kw: "тест"), \
+             mock.patch("modules.search.service.search", lambda q, max_results=5, **kw: []), \
+             mock.patch("modules.search.service.get_active_provider_name", lambda: "keenable"), \
+             mock.patch("modules.github.service._request", lambda method, path: {"rate": {"remaining": 4999}}):
+            report = diagnostics.run_selftest()
+
+        self.assertIn("✅ GitHub", report)
+        self.assertIn("4999", report)
+
+    def test_selftest_reports_failure_clearly(self):
+        import modules.diagnostics.service as diagnostics
+        from llm.client import LLMError
+
+        def failing_llm(messages, **kw):
+            raise LLMError("недоступна")
+
+        with mock.patch("llm.client.chat_completion", failing_llm):
+            report = diagnostics.run_selftest()
+
+        self.assertIn("❌ LLM", report)
+        self.assertIn("недоступна", report)
+
+
 # ────────────────────────── LLM: оркестратор (REMEMBER + SEARCH теги) ──────────────────────────
 
 class TestOrchestrator(IsolatedDBTestCase):
