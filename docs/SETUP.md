@@ -57,6 +57,12 @@ curl http://localhost:8080/health
    ```
    Ответ должен содержать `"ok": true`.
 7. Напишите боту `/start` — должен ответить, список команд — `/help`.
+8. (Необязательно) Меню команд рядом с полем ввода в Telegram:
+   ```bash
+   TELEGRAM_BOT_TOKEN=... python scripts/set_commands.py
+   ```
+   Разово, при первой настройке или когда меняете список команд в
+   `scripts/set_commands.py` — не на каждый деплой.
 
 ## Деплой SearxNG как отдельного сервиса на Railway
 
