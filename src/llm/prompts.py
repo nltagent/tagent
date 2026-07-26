@@ -47,6 +47,26 @@ def _current_datetime_str() -> str:
     return f"{now.strftime('%Y-%m-%d %H:%M')} ({config.USER_TIMEZONE}, {now.strftime('%A')})"
 
 
+def _self_identity_str() -> str:
+    from llm import providers
+    from llm.client import get_active_model
+
+    profile = providers.get_active_profile_name()
+    model = get_active_model()
+    base_url, _ = providers.get_active_credentials()
+    return (
+        f"Технически ты работаешь как часть личного Telegram-агента "
+        f"пользователя (не отдельное приложение и не публичный сервис): "
+        f"языковая модель «{model}», обращение к ней идёт через "
+        f"провайдера/API по адресу {base_url} (профиль «{profile}» в "
+        f"настройках агента). Если спросят, кто ты или на чём основан "
+        f"— отвечай честно на основе этой информации, не выдумывай "
+        f"другое; о своих более общих свойствах (кто тебя обучил, как "
+        f"устроена архитектура и т.п.) можешь рассказывать то, что "
+        f"знаешь о себе как о модели «{model}»."
+    )
+
+
 def build_system_prompt() -> str:
     memory_block = self_memory.as_prompt_block()
     base = (
@@ -54,6 +74,7 @@ def build_system_prompt() -> str:
         .replace("{max_queries}", str(config.SEARCH_MAX_QUERIES_PER_TURN))
         .replace("{current_datetime}", _current_datetime_str())
     )
+    base = f"{base}\n\n{_self_identity_str()}"
     if memory_block:
         return f"{base}\n\n{memory_block}"
     return base
@@ -67,6 +88,18 @@ SUMMARIZE_INSTRUCTIONS = (
     "открытые вопросы, но убери бытовые детали и малозначимые реплики. "
     "Пиши компактно, связным текстом, не более 200 слов. Верни только "
     "саму сводку, без пояснений."
+)
+
+# Отдельная задача — не "включить в сводку", а сжать УЖЕ готовый
+# текст (например, полную историю диалога) до жёсткого лимита длины,
+# когда он не помещается в одно сообщение Telegram (см. /history).
+COMPRESS_TO_LENGTH_INSTRUCTIONS = (
+    "Сожми следующий текст так, чтобы он поместился в {max_length} "
+    "символов — это жёсткий лимит, за него нельзя выходить. Сохрани "
+    "смысл, все важные факты, имена и договорённости, но убери "
+    "малозначимые детали и повторы. Пиши на том же языке, что и "
+    "оригинал. Верни только сжатый текст, без пояснений о том, что "
+    "ты сделал."
 )
 
 # Отдельный, дешёвый вызов (шаг 8) — дочищает черновой запрос модели

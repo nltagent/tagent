@@ -86,6 +86,64 @@ class IsolatedDBTestCase(unittest.TestCase):
         config.__dict__.update(self._config_snapshot)
 
 
+# ────────────────────────── Разбивка длинных сообщений ──────────────────────────
+
+class TestMessageChunking(unittest.TestCase):
+    def test_short_text_is_single_chunk(self):
+        from telegram.api import split_text_into_chunks
+
+        self.assertEqual(split_text_into_chunks("привет", max_length=100), ["привет"])
+        self.assertEqual(split_text_into_chunks("", max_length=100), [])
+
+    def test_splits_on_paragraph_boundary_first(self):
+        from telegram.api import split_text_into_chunks
+
+        text = ("Абзац раз. " * 3 + "\n\n") * 2 + "Абзац раз. " * 3
+        chunks = split_text_into_chunks(text.strip(), max_length=60)
+        self.assertTrue(all(len(c) <= 60 for c in chunks))
+        self.assertGreater(len(chunks), 1)
+
+    def test_falls_back_to_sentence_boundary(self):
+        from telegram.api import split_text_into_chunks
+
+        text = "Предложение номер один. " * 6 + "Предложение номер два. " * 6
+        chunks = split_text_into_chunks(text, max_length=100)
+        self.assertTrue(all(len(c) <= 100 for c in chunks))
+        # Ни одно предложение не должно быть разорвано посередине
+        for c in chunks:
+            self.assertFalse(c.startswith(" "))
+
+    def test_hard_split_when_no_boundaries_at_all(self):
+        from telegram.api import split_text_into_chunks
+
+        text = "a" * 250
+        chunks = split_text_into_chunks(text, max_length=100)
+        self.assertEqual(sum(len(c) for c in chunks), 250)
+        self.assertTrue(all(len(c) <= 100 for c in chunks))
+
+    def test_exact_boundary_length(self):
+        from telegram.api import split_text_into_chunks
+
+        text = "x" * 100
+        self.assertEqual(split_text_into_chunks(text, max_length=100), [text])
+
+    def test_send_long_message_sends_one_call_per_chunk(self):
+        from telegram.api import send_long_message
+
+        sent = []
+        with mock.patch("telegram.api.send_message", lambda chat_id, text, **kw: sent.append(text)):
+            send_long_message(1, "короткий текст", max_length=100)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0], "короткий текст")  # без префикса [1/1], раз чанк один
+
+        sent.clear()
+        long_text = "Предложение. " * 30
+        with mock.patch("telegram.api.send_message", lambda chat_id, text, **kw: sent.append(text)):
+            send_long_message(1, long_text, max_length=50)
+        self.assertGreater(len(sent), 1)
+        self.assertTrue(sent[0].startswith("[1/"))
+
+
 # ────────────────────────── Заметки ──────────────────────────
 
 class TestNotes(IsolatedDBTestCase):
@@ -545,6 +603,15 @@ class TestPrompts(unittest.TestCase):
         self.assertIn("Текущие дата и время", prompt)
         self.assertIn(str(datetime.now().year), prompt)
         self.assertIn(config.USER_TIMEZONE, prompt)
+
+    def test_system_prompt_includes_self_identity(self):
+        import llm.prompts as prompts
+        from llm.client import get_active_model
+
+        prompt = prompts.build_system_prompt()
+        self.assertIn(get_active_model(), prompt)
+        self.assertIn(config.LLM_BASE_URL, prompt)
+        self.assertIn("личного Telegram-агента", prompt)
 
 
 # ────────────────────────── Несколько профилей LLM-провайдеров ──────────────────────────
@@ -1109,6 +1176,23 @@ class TestRouterCommands(IsolatedDBTestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+        # send_long_message/send_chat_action живут в telegram.api и
+        # вызывают СВОИ внутренние send_message/HTTP-запросы — патч
+        # router.send_message их не перехватывает (это другой
+        # модульный биндинг), поэтому патчим отдельно.
+        def fake_send_long_message(chat_id, text, max_length=None, **kw):
+            from telegram.api import split_text_into_chunks, MAX_MESSAGE_LENGTH
+            for chunk in split_text_into_chunks(text, max_length or MAX_MESSAGE_LENGTH):
+                self.sent.append((chat_id, chunk))
+
+        patcher2 = mock.patch.object(router, "send_long_message", fake_send_long_message)
+        patcher2.start()
+        self.addCleanup(patcher2.stop)
+
+        patcher3 = mock.patch.object(router, "send_chat_action", lambda chat_id, action="typing": None)
+        patcher3.start()
+        self.addCleanup(patcher3.stop)
+
     def _upd(self, text, chat_id=1):
         return {"message": {"chat": {"id": chat_id}, "text": text}}
 
@@ -1121,6 +1205,46 @@ class TestRouterCommands(IsolatedDBTestCase):
         self.router.handle_update(self._upd("/note купить хлеб"))
         self.router.handle_update(self._upd("/notes"))
         self.assertTrue(any("купить хлеб" in t for _, t in self.sent))
+
+    def test_notes_truncated_by_default_and_full_on_request(self):
+        for i in range(80):
+            self.router.handle_update(self._upd(f"/note заметка номер {i} с некоторым текстом для объёма"))
+        self.sent.clear()
+
+        self.router.handle_update(self._upd("/notes"))
+        # По умолчанию — один (обрезанный) ответ с пометкой, что не всё показано
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("показаны не все заметки", self.sent[0][1])
+        self.assertLessEqual(len(self.sent[0][1]), 3700)
+
+        self.sent.clear()
+        self.router.handle_update(self._upd("/notes полностью"))
+        # Полностью — может быть несколько сообщений, но все заметки должны быть видны
+        joined = "\n".join(t for _, t in self.sent)
+        self.assertIn("заметка номер 0 ", joined)
+        self.assertIn("заметка номер 79 ", joined)
+
+    def test_history_compressed_by_default_and_full_on_request(self):
+        long_filler = "текст для объёма " * 15  # ~250 символов на сообщение
+        with mock.patch.object(
+            self.router.orchestrator, "chat_completion", lambda messages, **kw: "ответ на сообщение " + long_filler
+        ):
+            for i in range(15):
+                self.router.handle_update(self._upd(f"вопрос номер {i} {long_filler}"))
+        self.sent.clear()
+
+        with mock.patch.object(
+            self.router.orchestrator, "compress_text", lambda text, max_length=3600: "СЖАТАЯ ИСТОРИЯ"
+        ):
+            self.router.handle_update(self._upd("/history"))
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("СЖАТАЯ ИСТОРИЯ", self.sent[0][1])
+        self.assertIn("история сокращена", self.sent[0][1])
+
+        self.sent.clear()
+        self.router.handle_update(self._upd("/history полностью"))
+        joined = "\n".join(t for _, t in self.sent)
+        self.assertIn("вопрос номер 14", joined)  # последнее сообщение точно видно
 
     def test_help_lists_grouped_commands(self):
         self.router.handle_update(self._upd("/help"))

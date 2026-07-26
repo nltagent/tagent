@@ -132,6 +132,34 @@ def get_reply(chat_id: int | str, user_text: str) -> str:
     return cleaned_reply
 
 
+def compress_text(text: str, max_length: int = 3600) -> str:
+    """Сжимает произвольный текст до max_length символов через LLM,
+    сохраняя смысл — используется /history, когда полная история не
+    помещается в одно сообщение Telegram. При сбое LLM (или если
+    модель всё равно не уложилась в лимит) — просто обрезает по
+    границе предложения/абзаца, без потери работоспособности команды."""
+    from telegram.api import split_text_into_chunks
+
+    instruction = prompts.COMPRESS_TO_LENGTH_INSTRUCTIONS.format(max_length=max_length)
+    try:
+        compressed = chat_completion(
+            [
+                {"role": "system", "content": instruction},
+                {"role": "user", "content": text},
+            ],
+            max_tokens=3000,
+            temperature=0.3,
+        ).strip()
+    except LLMError:
+        log.exception("Не удалось сжать текст через LLM — обрезаю как есть")
+        return split_text_into_chunks(text, max_length)[0]
+
+    if len(compressed) <= max_length:
+        return compressed
+    # Модель не уложилась в лимит несмотря на инструкцию — подрежем сами.
+    return split_text_into_chunks(compressed, max_length)[0]
+
+
 def summarize_history(old_summary: str, messages_to_archive: list[dict]) -> str:
     """Callback для compactor.py — сжимает старую часть истории в
     короткую сводку одним отдельным вызовом LLM."""

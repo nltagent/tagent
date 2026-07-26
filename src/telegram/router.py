@@ -9,9 +9,16 @@
 from typing import Callable
 from datetime import datetime
 from zoneinfo import ZoneInfo
+import threading
 
 from config import config
-from telegram.api import send_message
+from telegram.api import (
+    send_message,
+    send_long_message,
+    send_chat_action,
+    split_text_into_chunks,
+    MAX_MESSAGE_LENGTH,
+)
 from core.logger import get_logger
 from modules.notes import service as notes
 from modules.memory import self_memory
@@ -55,13 +62,16 @@ def _cmd_help(chat_id: int | str, _args: str) -> None:
         chat_id,
         "📝 Заметки\n"
         "/note <текст> — сохранить\n"
-        "/notes — показать все\n"
+        "/notes [полностью] — показать (по умолчанию до "
+        f"{MAX_MESSAGE_LENGTH} симв., полностью — все, в нескольких "
+        "сообщениях)\n"
         "/delnote <id> — удалить\n\n"
         "🧠 Память и диалоги\n"
         "/remember <ключ>=<значение> — запомнить факт о себе/тебе надолго\n"
         "/memory — что помню\n"
         "/forget <ключ> — забыть факт\n"
-        "/history — история текущего диалога\n"
+        "/history [полностью] — история текущего диалога (по умолчанию "
+        "сжато через LLM, если не помещается в одно сообщение)\n"
         "/dialogs [все] — список диалогов\n"
         "/newdialog — начать новый\n"
         "/switchdialog <id> — переключиться\n"
@@ -102,13 +112,28 @@ def _cmd_note(chat_id: int | str, args: str) -> None:
     send_message(chat_id, f"Заметка #{note_id} сохранена.")
 
 
-def _cmd_notes(chat_id: int | str, _args: str) -> None:
+def _cmd_notes(chat_id: int | str, args: str) -> None:
     items = notes.list_notes(chat_id)
     if not items:
         send_message(chat_id, "Заметок пока нет.")
         return
     lines = [f"#{n['id']} ({n['created_at']}): {n['content']}" for n in items]
-    send_message(chat_id, "\n".join(lines))
+    full_text = "\n".join(lines)
+
+    want_full = args.strip().lower() in ("полностью", "все", "всё", "full")
+    if want_full or len(full_text) <= MAX_MESSAGE_LENGTH:
+        send_long_message(chat_id, full_text)
+        return
+
+    # По умолчанию — без обращения к LLM (это просто список данных,
+    # не текст для пересказа): обрезаем по границе абзаца/предложения
+    # и явно говорим, что показано не всё.
+    truncated = split_text_into_chunks(full_text, MAX_MESSAGE_LENGTH)[0]
+    send_message(
+        chat_id,
+        f"{truncated}\n\n… показаны не все заметки — /notes полностью для всех "
+        f"({len(items)} шт.).",
+    )
 
 
 def _cmd_delnote(chat_id: int | str, args: str) -> None:
@@ -149,7 +174,7 @@ def _cmd_forget(chat_id: int | str, args: str) -> None:
     send_message(chat_id, "Забыл." if ok else "Такого факта не помню.")
 
 
-def _cmd_history(chat_id: int | str, _args: str) -> None:
+def _cmd_history(chat_id: int | str, args: str) -> None:
     conversation_id = conversations.get_active_conversation_id(chat_id)
     items = dialog_history.get_all_messages(conversation_id, limit=20)
     if not items:
@@ -161,7 +186,25 @@ def _cmd_history(chat_id: int | str, _args: str) -> None:
         tag = " [архив]" if m["archived"] else ""
         who = "Я" if m["role"] == "assistant" else "Ты"
         lines.append(f"{who}{tag}: {m['content']}")
-    send_message(chat_id, "\n".join(lines))
+    full_text = "\n".join(lines)
+
+    want_full = args.strip().lower() in ("полностью", "все", "всё", "full")
+    if want_full:
+        send_long_message(chat_id, full_text)
+        return
+
+    if len(full_text) <= MAX_MESSAGE_LENGTH:
+        send_message(chat_id, full_text)
+        return
+
+    # По умолчанию — сжимаем через LLM (это связный текст переписки,
+    # тут, в отличие от /notes, есть смысл пересказывать, а не резать
+    # вслепую) и явно говорим, что это сокращённая версия.
+    compressed = orchestrator.compress_text(full_text, MAX_MESSAGE_LENGTH - 100)
+    send_message(
+        chat_id,
+        f"{compressed}\n\n… история сокращена — /history полностью для оригинала.",
+    )
 
 
 def _fmt_conversation(c: dict, active_id: int | None = None) -> str:
@@ -577,12 +620,33 @@ def _is_owner(chat_id: int | str) -> bool:
     return str(chat_id) == str(config.OWNER_CHAT_ID)
 
 
+def _with_typing_indicator(chat_id: int | str, fn, *args, **kwargs):
+    """Показывает "печатает..." в Telegram, пока выполняется долгая
+    операция (LLM + возможный поиск может занять несколько секунд).
+    Telegram сам гасит индикатор через ~5с, поэтому повторяем в
+    фоновом потоке, пока основная функция не вернёт результат."""
+    stop_event = threading.Event()
+
+    def _keep_typing():
+        while not stop_event.is_set():
+            send_chat_action(chat_id, "typing")
+            stop_event.wait(4)
+
+    thread = threading.Thread(target=_keep_typing, daemon=True)
+    thread.start()
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        stop_event.set()
+        thread.join(timeout=1)
+
+
 def _default_handler(chat_id: int | str, text: str) -> None:
     """Обычный текст — реальный диалог с LLM. orchestrator сам
     записывает историю, при необходимости запускает поиск, парсит
     теги памяти и запускает компакцию, когда пора."""
-    reply = orchestrator.get_reply(chat_id, text)
-    send_message(chat_id, reply)
+    reply = _with_typing_indicator(chat_id, orchestrator.get_reply, chat_id, text)
+    send_long_message(chat_id, reply)
 
 
 def handle_update(update: dict) -> None:
