@@ -758,6 +758,89 @@ class TestDiagnostics(IsolatedDBTestCase):
         self.assertIn("❌ LLM", report)
         self.assertIn("недоступна", report)
 
+    def test_cron_health_ok_when_no_overdue_reminders(self):
+        import modules.diagnostics.service as diagnostics
+
+        result = diagnostics._check_cron_health()
+        self.assertIn("просроченных недоставленных: 0", result)
+
+    def test_cron_health_flags_stuck_overdue_reminder(self):
+        import modules.diagnostics.service as diagnostics
+        from modules.reminders import service as reminders_service
+
+        now = datetime.now(timezone.utc)
+        reminders_service.add_reminder(1, "застрявшее напоминание", now - timedelta(days=2))
+
+        with self.assertRaises(RuntimeError) as ctx:
+            diagnostics._check_cron_health()
+        self.assertIn("Cron Job", str(ctx.exception))
+
+    def test_notes_and_dialogs_roundtrip_checks(self):
+        import modules.diagnostics.service as diagnostics
+        from modules.notes import service as notes_service
+        from modules.conversations import service as conversations
+
+        result = diagnostics._check_notes_roundtrip()
+        self.assertIn("работают", result)
+        self.assertEqual(notes_service.list_notes("_selftest"), [])  # убрано за собой
+
+        result2 = diagnostics._check_dialogs_roundtrip()
+        self.assertIn("работают", result2)
+
+    def test_github_roundtrip_skipped_without_test_repo(self):
+        import modules.diagnostics.service as diagnostics
+
+        config.GITHUB_TOKEN = "ghp_test"
+        config.GITHUB_TEST_REPO = ""
+        with self.assertRaises(diagnostics._Skip):
+            diagnostics._check_github_roundtrip()
+
+    def test_github_roundtrip_creates_and_cleans_up_branch(self):
+        import modules.diagnostics.service as diagnostics
+
+        config.GITHUB_TOKEN = "ghp_test"
+        config.GITHUB_TEST_REPO = "owner/test-repo"
+        calls = []
+
+        def fake_urlopen(req, timeout=20):
+            method, url = req.get_method(), req.full_url
+            calls.append((method, url))
+            if "/git/ref/heads/selftest-" in url:
+                raise http_error(url, 404)
+            if "/git/ref/heads/main" in url:
+                return FakeResponse(json.dumps({"object": {"sha": "s"}}).encode())
+            if "/git/refs" in url and method == "POST":
+                return FakeResponse(json.dumps({"ref": "refs/heads/x"}).encode())
+            if "/contents/" in url and method == "GET":
+                raise http_error(url, 404)
+            if "/contents/" in url and method == "PUT":
+                return FakeResponse(json.dumps({"content": {"html_url": "https://x"}}).encode())
+            if "/git/refs/heads/selftest-" in url and method == "DELETE":
+                return FakeResponse(b"{}")
+            raise AssertionError(f"{method} {url}")
+
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            result = diagnostics._check_github_roundtrip()
+
+        self.assertIn("branch+commit+delete", result)
+        self.assertEqual(calls[-1][0], "DELETE")  # ветка убрана за собой
+
+    def test_run_selftest_all_includes_expanded_checks(self):
+        import modules.diagnostics.service as diagnostics
+
+        config.GITHUB_TOKEN = ""
+        with mock.patch("llm.client.chat_completion", lambda messages, **kw: "тест"), \
+             mock.patch("modules.search.service.search", lambda q, max_results=5, **kw: []), \
+             mock.patch("modules.search.service.get_active_provider_name", lambda: "keenable"), \
+             mock.patch("llm.models.list_models", lambda: [{"id": "a", "name": "A", "free": True}]):
+            report = diagnostics.run_selftest_all()
+
+        self.assertIn("Cron / напоминания", report)
+        self.assertIn("Заметки (round-trip)", report)
+        self.assertIn("Диалоги (round-trip)", report)
+        self.assertIn("Список моделей", report)
+        self.assertIn("получено моделей от провайдера: 1", report)
+
 
 # ────────────────────────── LLM: оркестратор (REMEMBER + SEARCH теги) ──────────────────────────
 

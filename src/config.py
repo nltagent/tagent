@@ -143,5 +143,11 @@ class Config:
     # в команде) — обычно "main", но можно переопределить.
     GITHUB_BASE_BRANCH: str = os.environ.get("GITHUB_BASE_BRANCH", "main")
 
+    # Отдельный тестовый репозиторий (owner/name) для реального
+    # round-trip теста в /selftest_all (создание ветки+коммит+удаление).
+    # Пусто = эта конкретная проверка пропускается — по умолчанию
+    # /selftest_all не должен трогать ваши рабочие репозитории.
+    GITHUB_TEST_REPO: str = os.environ.get("GITHUB_TEST_REPO", "")
+
 
 config = Config()
