@@ -94,7 +94,9 @@ def _cmd_help(chat_id: int | str, _args: str) -> None:
         "/delremind <id> — удалить\n\n"
         "📊 Сервер\n"
         "/status — память/нагрузка/диск\n"
-        "/selftest — живая самопроверка всех навыков на реальных вызовах\n\n"
+        "/selftest — живая самопроверка (быстрая, 5 базовых проверок)\n"
+        "/selftest_all — полная самопроверка (заметки, диалоги, "
+        "cron/напоминания, модели, GitHub round-trip)\n\n"
         "🐙 GitHub\n"
         "/pushcode owner/repo ветка путь/файл + код на след. строках — "
         "закоммитить готовый код\n"
@@ -362,6 +364,15 @@ def _cmd_selftest(chat_id: int | str, _args: str) -> None:
     send_message(chat_id, diagnostics.run_selftest())
 
 
+def _cmd_selftest_all(chat_id: int | str, _args: str) -> None:
+    send_message(
+        chat_id,
+        "Запускаю полную самопроверку — пройдусь почти по всем функциям "
+        "реальными вызовами, это может занять до минуты...",
+    )
+    send_long_message(chat_id, diagnostics.run_selftest_all())
+
+
 def _fmt_model_list(items: list[dict], header: str) -> str:
     lines = [f"🆓 {m['id']}" for m in items[:50]]
     more = f" (показаны первые {len(lines)} из {len(items)})" if len(items) > len(lines) else ""
@@ -603,6 +614,7 @@ COMMANDS: dict[str, CommandHandler] = {
     "/delremind": _cmd_delremind,
     "/status": _cmd_status,
     "/selftest": _cmd_selftest,
+    "/selftest_all": _cmd_selftest_all,
     "/models": _cmd_models_free,
     "/models_free": _cmd_models_free,
     "/models_all": _cmd_models_all,
