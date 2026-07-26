@@ -15,9 +15,9 @@ import json
 import urllib.request
 import urllib.error
 
-from config import config
 from core.logger import get_logger
 from core.rate_limiter import RateLimiter
+from llm import providers
 
 log = get_logger(__name__)
 
@@ -50,10 +50,11 @@ def _fetch_raw() -> list[dict]:
     """Сырые записи моделей ровно как их вернул провайдер (список
     словарей из поля "data") — используется и list_models(), и
     llm/model_filter.py для более умного анализа."""
-    url = f"{config.LLM_BASE_URL.rstrip('/')}/models"
+    base_url, api_key = providers.get_active_credentials()
+    url = f"{base_url.rstrip('/')}/models"
     headers = {}
-    if config.LLM_API_KEY:
-        headers["Authorization"] = f"Bearer {config.LLM_API_KEY}"
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
 
     _limiter.wait_if_needed()
     req = urllib.request.Request(url, headers=headers, method="GET")
