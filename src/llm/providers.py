@@ -92,17 +92,23 @@ def set_active_profile(name: str) -> None:
     set_setting(_ACTIVE_KEY, name)
 
 
-def get_active_credentials() -> tuple[str, str]:
-    """Возвращает (base_url, api_key) активного профиля."""
-    name = get_active_profile_name()
+def get_credentials_for(name: str) -> tuple[str, str]:
+    """Возвращает (base_url, api_key) КОНКРЕТНОГО профиля по имени —
+    не обязательно активного. Нужно для отказоустойчивого вызова
+    (llm/fallback.py), который перебирает профили, не переключая
+    активный (чтобы не менять настройку пользователя ради одной
+    попытки)."""
     if name == DEFAULT_PROFILE_NAME:
         return config.LLM_BASE_URL, config.LLM_API_KEY
     profile = _load_profiles().get(name)
     if not profile:
-        # Профиль пропал (например, удалили руками из БД) — не падаем,
-        # откатываемся на default, а не роняем весь диалог с LLM.
         return config.LLM_BASE_URL, config.LLM_API_KEY
     return profile["base_url"], profile["api_key"]
+
+
+def get_active_credentials() -> tuple[str, str]:
+    """Возвращает (base_url, api_key) активного профиля."""
+    return get_credentials_for(get_active_profile_name())
 
 
 def get_default_model_for_profile(name: str) -> str:
