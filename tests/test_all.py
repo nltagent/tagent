@@ -616,6 +616,94 @@ class TestPrompts(unittest.TestCase):
 
 # ────────────────────────── Несколько профилей LLM-провайдеров ──────────────────────────
 
+# ────────────────────────── Отказоустойчивость LLM (fallback) ──────────────────────────
+
+class TestFallback(IsolatedDBTestCase):
+    def test_falls_back_to_free_model_same_provider(self):
+        from llm import fallback, model_filter
+        from llm.client import LLMError
+
+        def fake_chat_completion(messages, max_tokens=1000, temperature=0.7,
+                                  profile_name=None, model=None):
+            if model == config.LLM_MODEL:
+                raise LLMError("модель временно недоступна")
+            if model == "or/free-backup":
+                return "ответ от резерва"
+            raise LLMError("неожиданная модель")
+
+        with mock.patch.object(
+            model_filter, "classify_free_models",
+            lambda force_refresh=False: [{"id": "or/free-backup", "name": "Backup"}],
+        ), mock.patch.object(fallback, "chat_completion", fake_chat_completion):
+            result = fallback.resilient_chat_completion([{"role": "user", "content": "hi"}])
+
+        self.assertEqual(result.text, "ответ от резерва")
+        self.assertTrue(result.used_fallback)
+        self.assertEqual(result.model, "or/free-backup")
+
+    def test_falls_back_to_another_provider_profile(self):
+        from llm import fallback, providers, model_filter
+        from llm.client import LLMError
+
+        providers.add_profile("clavis", "https://api.clavis.to/v1", "sk-1", "clavis/m")
+
+        def fake_chat_completion(messages, max_tokens=1000, temperature=0.7,
+                                  profile_name=None, model=None):
+            if profile_name == "default":
+                raise LLMError("весь провайдер лежит")
+            return "ответ от clavis"
+
+        with mock.patch.object(model_filter, "classify_free_models", lambda force_refresh=False: []), \
+             mock.patch.object(fallback, "chat_completion", fake_chat_completion):
+            result = fallback.resilient_chat_completion([{"role": "user", "content": "hi"}])
+
+        self.assertEqual(result.profile_name, "clavis")
+        self.assertTrue(result.used_fallback)
+
+    def test_no_fallback_needed_when_active_model_works(self):
+        from llm import fallback
+
+        with mock.patch.object(fallback, "chat_completion", lambda messages, **kw: "ok сразу"):
+            result = fallback.resilient_chat_completion([{"role": "user", "content": "hi"}])
+
+        self.assertEqual(result.text, "ok сразу")
+        self.assertFalse(result.used_fallback)
+
+    def test_raises_when_everything_fails(self):
+        from llm import fallback, providers
+        from llm.client import LLMError
+
+        providers.add_profile("clavis", "https://api.clavis.to/v1", "sk-1", "clavis/m")
+
+        def always_fails(messages, **kw):
+            raise LLMError("недоступно")
+
+        with mock.patch.object(fallback, "chat_completion", always_fails):
+            with self.assertRaises(fallback.AllProvidersFailedError):
+                fallback.resilient_chat_completion([{"role": "user", "content": "hi"}])
+
+    def test_orchestrator_uses_fallback_transparently(self):
+        """orchestrator.chat_completion теперь = resilient-обёртка, но
+        вызывающий код (get_reply) не заметил разницы — сигнатура и
+        возврат (строка) те же самые."""
+        import llm.orchestrator as orchestrator
+        from llm.client import LLMError
+
+        def fake_low_level(messages, max_tokens=1000, temperature=0.7,
+                           profile_name=None, model=None):
+            if model == config.LLM_MODEL:
+                raise LLMError("недоступна")
+            return "ответ от резерва через оркестратор"
+
+        with mock.patch(
+            "llm.model_filter.classify_free_models",
+            lambda force_refresh=False: [{"id": "or/free-backup", "name": "Backup"}],
+        ), mock.patch("llm.fallback.chat_completion", fake_low_level):
+            reply = orchestrator.get_reply(1, "привет")
+
+        self.assertEqual(reply, "ответ от резерва через оркестратор")
+
+
 class TestProviders(IsolatedDBTestCase):
     def test_default_profile_uses_config(self):
         from llm import providers

@@ -20,7 +20,8 @@ import re
 from config import config
 from core.logger import get_logger
 from llm import prompts
-from llm.client import chat_completion, LLMError
+from llm.client import LLMError
+from llm.fallback import resilient_chat_completion_text as chat_completion
 from modules.memory import self_memory, history as dialog_history, compactor
 from modules.conversations import service as conversations
 from modules.search import service as search_service
