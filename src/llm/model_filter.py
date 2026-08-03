@@ -9,8 +9,9 @@ pricing.completion, но у других провайдеров, наприме�
 (llm.models.list_price_hints — id + любые поля, похожие на цену по
 названию) и просим её саму разобраться, что бесплатно. Один
 дополнительный вызов LLM, но результат кэшируется (settings, TTL —
-FREE_MODELS_CACHE_HOURS), так что на каждый /models не тратится новый
-запрос.
+FREE_MODELS_CACHE_HOURS) отдельно на каждого пользователя (у разных
+пользователей разные провайдеры/списки моделей), так что на каждый
+/models не тратится новый запрос.
 
 При сбое анализа — откат на простую эвристику llm.models.list_free_models().
 """
@@ -25,7 +26,10 @@ from storage.db import get_setting, set_setting
 
 log = get_logger(__name__)
 
-_CACHE_KEY = "free_models_cache"
+
+def _cache_key(chat_id: int | str) -> str:
+    return f"free_models_cache:{chat_id}"
+
 
 _ANALYZE_SYSTEM = (
     "Тебе даны данные о моделях от API-провайдера в формате JSON: у "
@@ -39,8 +43,8 @@ _ANALYZE_SYSTEM = (
 )
 
 
-def _read_cache() -> list[dict] | None:
-    raw = get_setting(_CACHE_KEY)
+def _read_cache(chat_id: int | str) -> list[dict] | None:
+    raw = get_setting(_cache_key(chat_id))
     if not raw:
         return None
     try:
@@ -54,25 +58,27 @@ def _read_cache() -> list[dict] | None:
     return data["models"]
 
 
-def _write_cache(models: list[dict]) -> None:
+def _write_cache(chat_id: int | str, models: list[dict]) -> None:
     payload = json.dumps(
         {"cached_at": datetime.now(timezone.utc).isoformat(), "models": models},
         ensure_ascii=False,
     )
-    set_setting(_CACHE_KEY, payload)
+    set_setting(_cache_key(chat_id), payload)
 
 
-def classify_free_models(force_refresh: bool = False) -> list[dict]:
-    """Возвращает [{"id", "name"}, ...] — модели, которые LLM сочла
-    бесплатными по анализу сырых данных о цене. Результат кэшируется
-    на FREE_MODELS_CACHE_HOURS часов; force_refresh=True игнорирует кэш."""
+def classify_free_models(chat_id: int | str, force_refresh: bool = False) -> list[dict]:
+    """Возвращает [{"id", "name"}, ...] — модели активного провайдера
+    ЭТОГО пользователя, которые LLM сочла бесплатными по анализу
+    сырых данных о цене. Результат кэшируется на
+    FREE_MODELS_CACHE_HOURS часов на chat_id; force_refresh=True
+    игнорирует кэш."""
     if not force_refresh:
-        cached = _read_cache()
+        cached = _read_cache(chat_id)
         if cached is not None:
             return cached
 
     try:
-        raw = llm_models._fetch_raw()  # один HTTP-запрос на весь анализ
+        raw = llm_models._fetch_raw(chat_id)  # один HTTP-запрос на весь анализ
     except llm_models.ModelsError:
         raise  # это ошибка сети/API, а не анализа — пусть вызывающий код её обработает
 
@@ -90,6 +96,7 @@ def classify_free_models(force_refresh: bool = False) -> list[dict]:
 
     try:
         reply = chat_completion(
+            chat_id,
             [
                 {"role": "system", "content": _ANALYZE_SYSTEM},
                 {"role": "user", "content": json.dumps(hints, ensure_ascii=False)},
@@ -105,9 +112,9 @@ def classify_free_models(force_refresh: bool = False) -> list[dict]:
             for m in raw
             if llm_models._is_free(m) is True
         ]
-        _write_cache(fallback)
+        _write_cache(chat_id, fallback)
         return fallback
 
     result = [{"id": mid, "name": id_to_name.get(mid, mid)} for mid in id_to_name if mid in free_ids]
-    _write_cache(result)
+    _write_cache(chat_id, result)
     return result

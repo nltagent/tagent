@@ -1,12 +1,13 @@
 """
-Список моделей у текущего провайдера. Подтверждено по документации
-OpenRouter: GET https://openrouter.ai/api/v1/models возвращает
-{"data": [{"id", "name", "pricing": {"prompt", "completion"}, ...}]}
-— бесплатные вычисляются по pricing.prompt == "0" (плюс подстраховка
-на суффикс ":free" в id). Для clavis.to и любых других провайдеров, у
-которых цена может лежать в другом поле или формате, простой эвристики
-может не хватать — см. llm/model_filter.py, где сырые данные (в том
-числе любые поля, похожие на цену) отдаются на анализ самой LLM.
+Список моделей у текущего провайдера ЭТОГО пользователя. Подтверждено
+по документации OpenRouter: GET https://openrouter.ai/api/v1/models
+возвращает {"data": [{"id", "name", "pricing": {"prompt", "completion"},
+...}]} — бесплатные вычисляются по pricing.prompt == "0" (плюс
+подстраховка на суффикс ":free" в id). Для clavis.to и любых других
+провайдеров, у которых цена может лежать в другом поле или формате,
+простой эвристики может не хватать — см. llm/model_filter.py, где
+сырые данные (в том числе любые поля, похожие на цену) отдаются на
+анализ самой LLM.
 
 Если у провайдера нет поля pricing вовсе — считаем принадлежность к
 бесплатным неизвестной (free=None), а не молча приравниваем к платным.
@@ -21,8 +22,11 @@ from llm import providers
 
 log = get_logger(__name__)
 
-# Отдельный, лёгкий лимитер — команда вызывается редко (руками), не
-# стоит делить его с лимитером chat_completion.
+# Отдельный, лёгкий лимитер на процесс — команда вызывается редко
+# (руками), не стоит делить его с лимитером chat_completion. Общий на
+# всех пользователей: сама операция дешёвая и не завязана на чей-то
+# конкретный ключ отдельно от base_url/api_key, которые передаются
+# явно в каждый вызов.
 _limiter = RateLimiter(min_interval=1.0)
 
 _PRICE_HINT_WORDS = ("price", "pricing", "cost", "credit", "free", "tier", "plan")
@@ -46,11 +50,12 @@ def _is_free(model: dict) -> bool | None:
     return prompt_price == "0" and completion_price == "0"
 
 
-def _fetch_raw() -> list[dict]:
+def _fetch_raw(chat_id: int | str) -> list[dict]:
     """Сырые записи моделей ровно как их вернул провайдер (список
-    словарей из поля "data") — используется и list_models(), и
-    llm/model_filter.py для более умного анализа."""
-    base_url, api_key = providers.get_active_credentials()
+    словарей из поля "data") для активного профиля ЭТОГО пользователя
+    — используется и list_models(), и llm/model_filter.py для более
+    умного анализа."""
+    base_url, api_key = providers.get_active_credentials(chat_id)
     url = f"{base_url.rstrip('/')}/models"
     headers = {}
     if api_key:
@@ -72,29 +77,29 @@ def _fetch_raw() -> list[dict]:
     return [m for m in raw.get("data", []) if m.get("id")]
 
 
-def list_models() -> list[dict]:
+def list_models(chat_id: int | str) -> list[dict]:
     """Возвращает [{"id", "name", "free": True|False|None}, ...]."""
     return [
         {"id": m.get("id", ""), "name": m.get("name", m.get("id", "")), "free": _is_free(m)}
-        for m in _fetch_raw()
+        for m in _fetch_raw(chat_id)
     ]
 
 
-def list_free_models() -> list[dict]:
+def list_free_models(chat_id: int | str) -> list[dict]:
     """Простая эвристика (pricing.prompt/completion == '0' или суффикс
     ':free'). Для более надёжного варианта, не завязанного на схему
     конкретного провайдера, см. llm/model_filter.classify_free_models()."""
-    return [m for m in list_models() if m["free"] is True]
+    return [m for m in list_models(chat_id) if m["free"] is True]
 
 
-def list_price_hints() -> list[dict]:
+def list_price_hints(chat_id: int | str) -> list[dict]:
     """Компактная версия сырых данных: id модели плюс только те поля,
     которые похожи на цену/тариф по названию (не только "pricing" —
     у разных провайдеров это может называться иначе). Не тащим все
     остальные поля (описание, контекстное окно и т.п.) — они моделям
     для этой конкретной задачи не нужны и только раздувают токены."""
     hints = []
-    for m in _fetch_raw():
+    for m in _fetch_raw(chat_id):
         entry = {"id": m.get("id", "")}
         for key, value in m.items():
             if any(word in key.lower() for word in _PRICE_HINT_WORDS):

@@ -1,7 +1,8 @@
 """
 LLM редактирует файлы репозитория по текстовому запросу и пушит
 результат в отдельную ветку — без клонирования репозитория. Файлы
-читаются и записываются только через GitHub API:
+читаются и записываются только через GitHub API, с личным токеном
+ЭТОГО пользователя (chat_id) на каждый вызов:
   1. Текущее содержимое каждого файла — GET через Contents API
      (modules.github.service.get_file_content).
   2. Модель получает содержимое + запрос, возвращает новую версию
@@ -12,7 +13,6 @@ LLM редактирует файлы репозитория по текстов
 """
 import re
 
-from config import config
 from llm.client import chat_completion, LLMError
 from modules.github import service as github_service
 from modules.github.service import GitHubError
@@ -46,27 +46,28 @@ class EditError(RuntimeError):
 
 
 def edit_files(
+    chat_id: int | str,
     repo: str,
     branch: str,
     paths: list[str],
     instruction: str,
     base_branch: str | None = None,
 ) -> dict:
-    base_branch = base_branch or config.GITHUB_BASE_BRANCH
+    base_branch = base_branch or github_service.get_base_branch_for(chat_id)
 
     # Если ветка уже существует (например, продолжаем правки в ней же)
     # — читаем исходники из неё, а не из базовой, чтобы не потерять
     # предыдущие изменения. Если ветки ещё нет — читаем из базовой,
     # именно от неё она и будет создана.
     try:
-        read_branch = branch if github_service.branch_exists(repo, branch) else base_branch
+        read_branch = branch if github_service.branch_exists(chat_id, repo, branch) else base_branch
     except GitHubError as e:
         raise EditError(str(e)) from e
 
     current_contents = {}
     for path in paths:
         try:
-            current_contents[path] = github_service.get_file_content(repo, read_branch, path)
+            current_contents[path] = github_service.get_file_content(chat_id, repo, read_branch, path)
         except GitHubError as e:
             raise EditError(f"Не удалось прочитать {path}: {e}") from e
 
@@ -77,6 +78,7 @@ def edit_files(
 
     try:
         raw_reply = chat_completion(
+            chat_id,
             [
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": "\n".join(user_parts)},
@@ -100,7 +102,7 @@ def edit_files(
 
     try:
         result = github_service.push_files_to_branch(
-            repo, branch, new_files, message=message, base_branch=base_branch
+            chat_id, repo, branch, new_files, message=message, base_branch=base_branch
         )
     except GitHubError as e:
         raise EditError(f"Не удалось запушить изменения: {e}") from e

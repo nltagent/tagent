@@ -9,6 +9,15 @@
 locked" ошибки ценой почти нулевой задержки при таком трафике.
 Если это когда-нибудь станет узким местом — заменить один этот
 файл, остальной код не заметит разницы.
+
+Мультипользовательский слой: таблица users хранит роли (pending /
+user / vip / blocked / denied) для всех chat_id, кроме создателя
+(OWNER_CHAT_ID) — тот проверяется напрямую по конфигу, отдельной
+записи не требует (см. modules/users/service.py). agent_memory и
+usage_log были общими на весь бот — теперь у каждого chat_id своя
+самопамять и свой учёт расхода токенов; при обновлении с
+однопользовательской версии старые данные переносятся на
+OWNER_CHAT_ID (см. _migrate_agent_memory/_migrate_usage_log).
 """
 import os
 import sqlite3
@@ -33,10 +42,14 @@ CREATE TABLE IF NOT EXISTS notes (
     created_at  TEXT NOT NULL
 );
 
+-- Самопамять теперь личная на каждый chat_id (раньше была общей на
+-- весь бот) — см. _migrate_agent_memory для переноса старых данных.
 CREATE TABLE IF NOT EXISTS agent_memory (
-    key         TEXT PRIMARY KEY,
+    chat_id     TEXT NOT NULL,
+    key         TEXT NOT NULL,
     value       TEXT NOT NULL,
-    updated_at  TEXT NOT NULL
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY (chat_id, key)
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -68,15 +81,19 @@ CREATE TABLE IF NOT EXISTS conversations (
 );
 CREATE INDEX IF NOT EXISTS idx_conversations_chat ON conversations (chat_id, status);
 
+-- Учёт расхода токенов теперь тоже персональный (chat_id) — раньше
+-- usage_log был общим на весь бот, см. _migrate_usage_log.
 CREATE TABLE IF NOT EXISTS usage_log (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at          TEXT NOT NULL,
+    chat_id             TEXT,
     provider            TEXT NOT NULL,
     model               TEXT NOT NULL,
     prompt_tokens       INTEGER NOT NULL DEFAULT 0,
     completion_tokens   INTEGER NOT NULL DEFAULT 0,
     total_tokens        INTEGER NOT NULL DEFAULT 0
 );
+CREATE INDEX IF NOT EXISTS idx_usage_chat ON usage_log (chat_id, created_at);
 
 CREATE TABLE IF NOT EXISTS settings (
     key         TEXT PRIMARY KEY,
@@ -93,6 +110,19 @@ CREATE TABLE IF NOT EXISTS reminders (
     delivered   INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders (delivered, due_at);
+
+-- Роли пользователей бота. Создатель (config.OWNER_CHAT_ID) сюда НЕ
+-- записывается — у него полные права по определению, проверяется
+-- напрямую по конфигу (modules/users/service.py:is_owner). Роли:
+-- 'pending' (ждёт решения создателя), 'user'/'vip' (одобрен),
+-- 'blocked' (забанен), 'denied' (заявку отклонили).
+CREATE TABLE IF NOT EXISTS users (
+    chat_id       TEXT PRIMARY KEY,
+    role          TEXT NOT NULL DEFAULT 'pending',
+    requested_at  TEXT NOT NULL,
+    approved_by   TEXT,
+    approved_at   TEXT
+);
 """
 
 
@@ -106,12 +136,13 @@ def _get_conn() -> sqlite3.Connection:
         os.makedirs(os.path.dirname(config.DB_PATH), exist_ok=True)
         _conn = sqlite3.connect(config.DB_PATH, check_same_thread=False)
         _conn.row_factory = sqlite3.Row
-        # Важно: если messages уже существует (старая база) без
-        # conversation_id, добавляем колонку ДО того, как ниже
-        # выполнится SCHEMA — там есть индекс по этой колонке, а
-        # CREATE TABLE IF NOT EXISTS не добавляет колонки в уже
-        # существующую таблицу.
+        # Важно: миграции колонок/таблиц ДО executescript(SCHEMA) — у
+        # некоторых таблиц ниже есть индексы/ограничения по колонкам,
+        # которых в старой базе могло не быть, а CREATE TABLE IF NOT
+        # EXISTS не добавляет колонки в уже существующую таблицу.
         _add_conversation_id_column_if_missing(_conn)
+        _migrate_agent_memory(_conn)
+        _migrate_usage_log(_conn)
         _conn.executescript(SCHEMA)
         _conn.commit()
         _backfill_conversations(_conn)
@@ -129,6 +160,76 @@ def _add_conversation_id_column_if_missing(conn: sqlite3.Connection) -> None:
     if "conversation_id" not in cols:
         conn.execute("ALTER TABLE messages ADD COLUMN conversation_id INTEGER")
         conn.commit()
+
+
+def _migrate_agent_memory(conn: sqlite3.Connection) -> None:
+    """Раньше agent_memory была общей на весь бот (PRIMARY KEY просто
+    key). Теперь у каждого chat_id своя самопамять (PRIMARY KEY
+    (chat_id, key)) — старые факты переносятся на OWNER_CHAT_ID, чтобы
+    ничего не потерялось. На свежих базах таблицы либо ещё нет (её
+    создаст SCHEMA уже в новом виде), либо она уже мигрирована —
+    в обоих случаях эта функция ничего не делает."""
+    tables = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='agent_memory'"
+    ).fetchall()}
+    if "agent_memory" not in tables:
+        return
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(agent_memory)").fetchall()]
+    if "chat_id" in cols:
+        return  # уже новой формы
+
+    conn.execute("ALTER TABLE agent_memory RENAME TO agent_memory_old")
+    conn.execute(
+        """
+        CREATE TABLE agent_memory (
+            chat_id     TEXT NOT NULL,
+            key         TEXT NOT NULL,
+            value       TEXT NOT NULL,
+            updated_at  TEXT NOT NULL,
+            PRIMARY KEY (chat_id, key)
+        )
+        """
+    )
+    old_rows = conn.execute("SELECT key, value, updated_at FROM agent_memory_old").fetchall()
+    for row in old_rows:
+        conn.execute(
+            "INSERT INTO agent_memory (chat_id, key, value, updated_at) VALUES (?, ?, ?, ?)",
+            (str(config.OWNER_CHAT_ID), row[0], row[1], row[2]),
+        )
+    conn.execute("DROP TABLE agent_memory_old")
+    conn.commit()
+    if old_rows:
+        log.info(
+            "Мигрирована agent_memory: %d факт(ов) перенесено на OWNER_CHAT_ID",
+            len(old_rows),
+        )
+
+
+def _migrate_usage_log(conn: sqlite3.Connection) -> None:
+    """usage_log раньше не знал про chat_id (был общим на весь бот).
+    Добавляем колонку и относим все старые записи без chat_id на
+    OWNER_CHAT_ID — это единственный, кто мог их насчитать в
+    однопользовательской версии."""
+    tables = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='usage_log'"
+    ).fetchall()}
+    if "usage_log" not in tables:
+        return
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(usage_log)").fetchall()]
+    if "chat_id" not in cols:
+        conn.execute("ALTER TABLE usage_log ADD COLUMN chat_id TEXT")
+        conn.commit()
+
+    cur = conn.execute(
+        "UPDATE usage_log SET chat_id = ? WHERE chat_id IS NULL",
+        (str(config.OWNER_CHAT_ID),),
+    )
+    if cur.rowcount:
+        conn.commit()
+        log.info(
+            "Мигрирована usage_log: %d запись(ей) отнесено на OWNER_CHAT_ID",
+            cur.rowcount,
+        )
 
 
 def _backfill_conversations(conn: sqlite3.Connection) -> None:
@@ -216,24 +317,33 @@ def query_one(sql: str, params: tuple = ()) -> sqlite3.Row | None:
     return rows[0] if rows else None
 
 
-def log_usage(provider: str, model: str, prompt_tokens: int, completion_tokens: int, total_tokens: int) -> None:
+def log_usage(
+    chat_id: int | str,
+    provider: str,
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    total_tokens: int,
+) -> None:
     execute(
         """
-        INSERT INTO usage_log (created_at, provider, model, prompt_tokens, completion_tokens, total_tokens)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO usage_log (created_at, chat_id, provider, model, prompt_tokens, completion_tokens, total_tokens)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (now_iso(), provider, model, prompt_tokens, completion_tokens, total_tokens),
+        (now_iso(), str(chat_id), provider, model, prompt_tokens, completion_tokens, total_tokens),
     )
 
 
-def usage_today_totals() -> dict:
-    """Суммы за текущие UTC-сутки — используется командой /usage."""
+def usage_today_totals(chat_id: int | str) -> dict:
+    """Суммы за текущие UTC-сутки ДЛЯ ЭТОГО chat_id — используется
+    командой /usage (учёт расхода токенов персональный на пользователя)."""
     row = query_one(
         """
         SELECT COUNT(*) AS requests, COALESCE(SUM(total_tokens), 0) AS tokens
         FROM usage_log
-        WHERE date(created_at) = date('now')
-        """
+        WHERE date(created_at) = date('now') AND chat_id = ?
+        """,
+        (str(chat_id),),
     )
     return {"requests": row["requests"], "tokens": row["tokens"]} if row else {"requests": 0, "tokens": 0}
 

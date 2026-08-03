@@ -8,15 +8,24 @@
 провайдерами. Отдельный репозиторий не нужен — это просто ещё один
 модуль в том же проекте, вызывается командой /selftest.
 
+/selftest и /selftest_all доступны ТОЛЬКО создателю (см.
+telegram/router.py:_OWNER_ONLY_COMMANDS) — трогают инфраструктуру
+сервера и тратят реальные деньги на вызовы, поэтому все проверки
+здесь всегда идут от имени config.OWNER_CHAT_ID (это его собственные
+ключи/провайдеры, не общие и не чужие).
+
 Каждая проверка стоит немного реальных денег/лимитов (один вызов LLM,
 один поисковый запрос) — специально не автоматизировано по расписанию,
 запускается только вручную командой.
 """
 import time
 
+from config import config
 from core.logger import get_logger
 
 log = get_logger(__name__)
+
+_OWNER = config.OWNER_CHAT_ID
 
 
 class _Skip(Exception):
@@ -51,27 +60,26 @@ def _check_llm() -> str:
     from llm.client import chat_completion, get_active_model
 
     reply = chat_completion(
-        [{"role": "user", "content": "Ответь одним словом: тест"}], max_tokens=10
+        _OWNER, [{"role": "user", "content": "Ответь одним словом: тест"}], max_tokens=10
     )
-    return f"модель {get_active_model()}, ответ: {reply.strip()[:40]!r}"
+    return f"модель {get_active_model(_OWNER)}, ответ: {reply.strip()[:40]!r}"
 
 
 def _check_search() -> str:
     from modules.search import service as search_service
 
-    provider = search_service.get_active_provider_name()
-    results = search_service.search("test", max_results=1)
+    provider = search_service.get_active_provider_name(_OWNER)
+    results = search_service.search(_OWNER, "test", max_results=1)
     return f"провайдер {provider}, результатов: {len(results)}"
 
 
 def _check_github() -> str:
-    from config import config
+    from modules.github import service as gh
 
-    if not config.GITHUB_TOKEN:
-        raise _Skip("GITHUB_TOKEN не задан")
-    from modules.github.service import _request  # тот же клиент, что и у /pushcode
+    if not gh.get_token_for(_OWNER):
+        raise _Skip("GitHub-токен не задан (ни свой, ни GITHUB_TOKEN в .env)")
 
-    data = _request("GET", "/rate_limit")
+    data = gh._request(_OWNER, "GET", "/rate_limit")
     remaining = data.get("rate", {}).get("remaining", "?")
     return f"токен рабочий, осталось запросов к GitHub API: {remaining}"
 
@@ -88,9 +96,11 @@ def _check_cron_health() -> str:
     когда Railway Cron Job последний раз реально достучался до
     /internal/cron (по отметке last_monitoring_report_at, которую
     выставляет только scheduler.run_tick), и сколько просроченных,
-    но недоставленных напоминаний висит прямо сейчас. Если тик был
-    давно (или ни разу) и/или просроченных > 0 — Cron Job либо не
-    настроен, либо не достучивается (неверный URL/секрет/расписание)."""
+    но недоставленных напоминаний висит прямо сейчас (по ВСЕМ
+    пользователям — это инфраструктурная проверка, не персональная).
+    Если тик был давно (или ни разу) и/или просроченных > 0 — Cron Job
+    либо не настроен, либо не достучивается (неверный URL/секрет/
+    расписание)."""
     from datetime import datetime, timezone
     from storage.db import get_setting
     from modules.reminders import service as reminders_service
@@ -147,7 +157,7 @@ def _check_dialogs_roundtrip() -> str:
 def _check_models_list() -> str:
     from llm import models as llm_models
 
-    items = llm_models.list_models()
+    items = llm_models.list_models(_OWNER)
     return f"получено моделей от провайдера: {len(items)}"
 
 
@@ -158,25 +168,23 @@ def _check_github_roundtrip() -> str:
     тестового репозитория (GITHUB_TEST_REPO) — намеренно не трогает
     репозитории, которые вы не выделили специально под это."""
     import time as _time
-    from config import config
+    from modules.github import service as gh
 
-    if not config.GITHUB_TOKEN:
-        raise _Skip("GITHUB_TOKEN не задан")
+    if not gh.get_token_for(_OWNER):
+        raise _Skip("GitHub-токен не задан (ни свой, ни GITHUB_TOKEN в .env)")
     if not config.GITHUB_TEST_REPO:
         raise _Skip(
             "GITHUB_TEST_REPO не задан — укажите тестовый репозиторий "
             "(например ваш-логин/selftest-repo), чтобы включить эту проверку"
         )
 
-    from modules.github import service as gh
-
     branch = f"selftest-{int(_time.time())}"
     result = gh.push_file_to_branch(
-        config.GITHUB_TEST_REPO, branch, "selftest.txt",
+        _OWNER, config.GITHUB_TEST_REPO, branch, "selftest.txt",
         "ping from /selftest_all", "Selftest ping (auto-cleanup)",
     )
     # Убираем за собой — тестовый репозиторий не должен зарастать ветками.
-    gh._request("DELETE", f"/repos/{config.GITHUB_TEST_REPO}/git/refs/heads/{branch}")
+    gh._request(_OWNER, "DELETE", f"/repos/{config.GITHUB_TEST_REPO}/git/refs/heads/{branch}")
     return f"branch+commit+delete прошли ({result.get('file_html_url', '')})"
 
 
