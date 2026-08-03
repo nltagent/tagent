@@ -5,6 +5,10 @@ Self-hosted SearxNG (https://github.com/searxng/searxng) — бесплатна�
 MCP-searxng — нам не нужен MCP-протокол, только сам HTTP-эндпоинт,
 который MCP-обёртки тоже вызывают под капотом.
 
+Мультипользовательский слой: у каждого пользователя может быть свой
+инстанс (base_url передаётся явно, см. modules.search.service) —
+командой /setsearchkey searxng <base_url>.
+
 ВАЖНО про сам SearxNG (не про наш код): JSON-формат по умолчанию
 выключен на большинстве инстансов. В settings.yml вашего инстанса
 должно быть:
@@ -42,11 +46,14 @@ def _parse_response(raw: dict) -> list[dict]:
     return results
 
 
-def search(query: str, max_results: int = 5, **_ignored) -> list[dict]:
-    if not config.SEARXNG_BASE_URL:
+def search(query: str, max_results: int = 5, *, base_url: str | None = None, **_ignored) -> list[dict]:
+    """base_url — адрес КОНКРЕТНОГО пользователя (модуль сам никогда
+    не подставляет чужой или общий адрес — это решает
+    modules.search.service, который знает про роль вызывающего chat_id)."""
+    if not base_url:
         raise SearchConfigError(
-            "SEARXNG_BASE_URL не задан — укажите адрес вашего "
-            "self-hosted инстанса SearxNG (например http://localhost:8080)."
+            "Для SearxNG не задан ваш личный адрес инстанса — укажите: "
+            "/setsearchkey searxng http://ваш-адрес (без /search на конце)."
         )
 
     _limiter.wait_if_needed()
@@ -54,7 +61,7 @@ def search(query: str, max_results: int = 5, **_ignored) -> list[dict]:
     # SearxNG не поддерживает ограничение числа результатов на своей
     # стороне — обрезаем на нашей после получения ответа.
     params = urllib.parse.urlencode({"q": query, "format": "json"})
-    url = f"{config.SEARXNG_BASE_URL.rstrip('/')}/search?{params}"
+    url = f"{base_url.rstrip('/')}/search?{params}"
 
     req = urllib.request.Request(
         url,

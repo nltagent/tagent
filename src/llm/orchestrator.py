@@ -6,6 +6,11 @@ get_reply() — то, что вызывает router.py на любое обыч
 summarize_history() — то, что compactor.py вызывает, когда пора
 сжимать старую часть истории (см. modules/memory/compactor.py).
 
+Мультипользовательский слой: все функции здесь принимают chat_id и
+передают его дальше во все персональные модули (self_memory, LLM
+провайдер/ключи, поиск) — никакого общего состояния между
+пользователями.
+
 Шаг 8: модель может запросить НЕСКОЛЬКО поисков за один ответ
 ([SEARCH: ...] строк подряд, не больше config.SEARCH_MAX_QUERIES_PER_TURN).
 Каждый черновой запрос дочищается отдельным лёгким вызовом LLM
@@ -32,9 +37,9 @@ log = get_logger(__name__)
 _SEARCH_RE = re.compile(r"\[SEARCH:\s*(.+?)\]")
 
 
-def _messages_for_llm(conversation_id: int) -> list[dict]:
+def _messages_for_llm(chat_id: int | str, conversation_id: int) -> list[dict]:
     summary, active = compactor.build_context(conversation_id)
-    system_content = prompts.build_system_prompt()
+    system_content = prompts.build_system_prompt(chat_id)
     if summary:
         system_content += f"\n\nКраткая сводка более ранней части этого диалога:\n{summary}"
 
@@ -45,13 +50,14 @@ def _messages_for_llm(conversation_id: int) -> list[dict]:
     return messages
 
 
-def refine_query(draft_query: str) -> str:
+def refine_query(chat_id: int | str, draft_query: str) -> str:
     """Один лёгкий (короткий, дешёвый) вызов LLM, который переписывает
     черновой поисковый запрос модели в компактный "поисковый" вид.
     При сбое — просто используем черновой запрос как есть, не роняя
     весь ответ из-за этого."""
     try:
         refined = chat_completion(
+            chat_id,
             [
                 {"role": "system", "content": prompts.QUERY_REFINE_INSTRUCTIONS},
                 {"role": "user", "content": f"Черновой запрос: {draft_query}"},
@@ -79,9 +85,9 @@ def get_reply(chat_id: int | str, user_text: str) -> str:
 
     dialog_history.record_message(chat_id, conversation_id, "user", user_text)
 
-    messages = _messages_for_llm(conversation_id)
+    messages = _messages_for_llm(chat_id, conversation_id)
     try:
-        raw_reply = chat_completion(messages)
+        raw_reply = chat_completion(chat_id, messages)
     except LLMError as e:
         log.exception("Ошибка вызова LLM")
         return f"Не получилось получить ответ от модели ({e})."
@@ -93,11 +99,11 @@ def get_reply(chat_id: int | str, user_text: str) -> str:
         refined_queries = []
         result_blocks = []
         for draft in draft_queries:
-            refined = refine_query(draft.strip())
+            refined = refine_query(chat_id, draft.strip())
             refined_queries.append(refined)
             log.info("Поиск: черновой запрос %r -> уточнённый %r", draft.strip(), refined)
             try:
-                results = search_service.search(refined)
+                results = search_service.search(chat_id, refined)
                 result_blocks.append(search_service.format_for_llm(refined, results))
             except SearchError as e:
                 result_blocks.append(f"Поиск по «{refined}» не удался: {e}")
@@ -116,24 +122,27 @@ def get_reply(chat_id: int | str, user_text: str) -> str:
             }
         )
         try:
-            raw_reply = chat_completion(messages)
+            raw_reply = chat_completion(chat_id, messages)
         except LLMError as e:
             log.exception("Ошибка второго вызова LLM после поиска")
             return f"Нашёл информацию, но не смог сформулировать ответ ({e})."
 
         search_note = _format_search_note(refined_queries)
 
-    cleaned_reply, _facts = self_memory.extract_remember_tags(raw_reply)
+    cleaned_reply, _facts = self_memory.extract_remember_tags(chat_id, raw_reply)
 
     dialog_history.record_message(chat_id, conversation_id, "assistant", cleaned_reply)
-    compactor.maybe_compact(conversation_id, summarize_history)
+    compactor.maybe_compact(
+        conversation_id,
+        lambda old_summary, msgs: summarize_history(chat_id, old_summary, msgs),
+    )
 
     if search_note:
         return f"{search_note}\n\n{cleaned_reply}"
     return cleaned_reply
 
 
-def compress_text(text: str, max_length: int = 3600) -> str:
+def compress_text(chat_id: int | str, text: str, max_length: int = 3600) -> str:
     """Сжимает произвольный текст до max_length символов через LLM,
     сохраняя смысл — используется /history, когда полная история не
     помещается в одно сообщение Telegram. При сбое LLM (или если
@@ -144,6 +153,7 @@ def compress_text(text: str, max_length: int = 3600) -> str:
     instruction = prompts.COMPRESS_TO_LENGTH_INSTRUCTIONS.format(max_length=max_length)
     try:
         compressed = chat_completion(
+            chat_id,
             [
                 {"role": "system", "content": instruction},
                 {"role": "user", "content": text},
@@ -161,9 +171,10 @@ def compress_text(text: str, max_length: int = 3600) -> str:
     return split_text_into_chunks(compressed, max_length)[0]
 
 
-def summarize_history(old_summary: str, messages_to_archive: list[dict]) -> str:
-    """Callback для compactor.py — сжимает старую часть истории в
-    короткую сводку одним отдельным вызовом LLM."""
+def summarize_history(chat_id: int | str, old_summary: str, messages_to_archive: list[dict]) -> str:
+    """Callback для compactor.py (см. get_reply, где он оборачивается
+    в лямбду с уже привязанным chat_id) — сжимает старую часть истории
+    в короткую сводку одним отдельным вызовом LLM от имени chat_id."""
     transcript = "\n".join(
         f"{'Пользователь' if m['role'] == 'user' else 'Ассистент'}: {m['content']}"
         for m in messages_to_archive
@@ -177,7 +188,7 @@ def summarize_history(old_summary: str, messages_to_archive: list[dict]) -> str:
         {"role": "user", "content": user_content},
     ]
     try:
-        return chat_completion(messages, max_tokens=400, temperature=0.3)
+        return chat_completion(chat_id, messages, max_tokens=400, temperature=0.3)
     except LLMError:
         log.exception("Не удалось сжать историю — компакция будет отложена")
         return None

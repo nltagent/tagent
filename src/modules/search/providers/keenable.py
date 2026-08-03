@@ -7,7 +7,8 @@ Keenable — https://docs.keenable.ai (спецификация подтверж
 заголовок X-API-Key при каждом запросе — без него отвечает
 "Missing API key". Похоже, keyless-режим работает только через их
 CLI/MCP-обвязку, а не через голый REST API. Получите ключ на
-https://keenable.ai/console и укажите в KEENABLE_API_KEY.
+https://keenable.ai/console и укажите его командой /setsearchkey
+keenable <ключ> (у каждого пользователя — свой собственный ключ).
 
 Лимиты (https://docs.keenable.ai/rate-limits.md): с ключом — 10
 запросов/сек без часового лимита.
@@ -39,12 +40,16 @@ def _parse_response(raw: dict) -> list[dict]:
     return results
 
 
-def search(query: str, max_results: int = 5, **filters) -> list[dict]:
-    if not config.KEENABLE_API_KEY:
+def search(query: str, max_results: int = 5, *, api_key: str | None = None, **filters) -> list[dict]:
+    """api_key — ключ КОНКРЕТНОГО пользователя (модуль сам никогда не
+    подставляет чужой или общий ключ — это решает modules.search.service,
+    который знает про роль вызывающего chat_id)."""
+    if not api_key:
         raise SearchConfigError(
-            "KEENABLE_API_KEY не задан — вопреки документации, реальный "
-            "REST API Keenable требует ключ на каждый запрос. Получите "
-            "его на https://keenable.ai/console."
+            "Для Keenable не задан ваш личный API-ключ — вопреки "
+            "документации, реальный REST API Keenable требует ключ на "
+            "каждый запрос. Получите его на https://keenable.ai/console "
+            "и укажите: /setsearchkey keenable <ключ>."
         )
 
     _limiter.wait_if_needed()
@@ -53,7 +58,7 @@ def search(query: str, max_results: int = 5, **filters) -> list[dict]:
     data = json.dumps(body).encode("utf-8")
 
     url = f"{config.KEENABLE_BASE_URL}/v1/search"
-    headers = {"Content-Type": "application/json", "X-API-Key": config.KEENABLE_API_KEY}
+    headers = {"Content-Type": "application/json", "X-API-Key": api_key}
 
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:

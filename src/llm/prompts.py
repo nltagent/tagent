@@ -47,13 +47,25 @@ def _current_datetime_str() -> str:
     return f"{now.strftime('%Y-%m-%d %H:%M')} ({config.USER_TIMEZONE}, {now.strftime('%A')})"
 
 
-def _self_identity_str() -> str:
+def _self_identity_str(chat_id: int | str) -> str:
     from llm import providers
     from llm.client import get_active_model
+    from llm.providers import ProviderError
 
-    profile = providers.get_active_profile_name()
-    model = get_active_model()
-    base_url, _ = providers.get_active_credentials()
+    profile = providers.get_active_profile_name(chat_id)
+    if not profile:
+        return (
+            "Технически ты работаешь как часть личного Telegram-агента "
+            "пользователя, но для этого конкретного пользователя ещё не "
+            "настроен ни один LLM-провайдер (см. /addprovider) — если "
+            "спросят, на чём ты сейчас основан, честно скажи, что "
+            "провайдер не настроен."
+        )
+    model = get_active_model(chat_id)
+    try:
+        base_url, _ = providers.get_active_credentials(chat_id)
+    except ProviderError:
+        base_url = "(не настроено)"
     return (
         f"Технически ты работаешь как часть личного Telegram-агента "
         f"пользователя (не отдельное приложение и не публичный сервис): "
@@ -67,14 +79,14 @@ def _self_identity_str() -> str:
     )
 
 
-def build_system_prompt() -> str:
-    memory_block = self_memory.as_prompt_block()
+def build_system_prompt(chat_id: int | str) -> str:
+    memory_block = self_memory.as_prompt_block(chat_id)
     base = (
         BASE_INSTRUCTIONS
         .replace("{max_queries}", str(config.SEARCH_MAX_QUERIES_PER_TURN))
         .replace("{current_datetime}", _current_datetime_str())
     )
-    base = f"{base}\n\n{_self_identity_str()}"
+    base = f"{base}\n\n{_self_identity_str(chat_id)}"
     if memory_block:
         return f"{base}\n\n{memory_block}"
     return base
