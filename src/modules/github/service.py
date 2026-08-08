@@ -48,6 +48,23 @@ def _base_branch_key(chat_id: int | str) -> str:
     return f"github_base_branch:{chat_id}"
 
 
+def _test_repo_key(chat_id: int | str) -> str:
+    return f"github_test_repo:{chat_id}"
+
+
+def set_test_repo(chat_id: int | str, repo: str) -> None:
+    set_setting(_test_repo_key(chat_id), repo.strip())
+
+
+def get_test_repo_for(chat_id: int | str) -> str:
+    stored = get_setting(_test_repo_key(chat_id))
+    if stored:
+        return stored
+    if users_service.is_owner(chat_id):
+        return config.GITHUB_TEST_REPO
+    return ""
+
+
 def set_credentials(chat_id: int | str, token: str, base_branch: str = "") -> None:
     set_setting(_token_key(chat_id), token.strip())
     if base_branch.strip():

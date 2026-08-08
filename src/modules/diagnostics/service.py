@@ -172,19 +172,20 @@ def _check_github_roundtrip() -> str:
 
     if not gh.get_token_for(_OWNER):
         raise _Skip("GitHub-токен не задан (ни свой, ни GITHUB_TOKEN в .env)")
-    if not config.GITHUB_TEST_REPO:
+    test_repo = gh.get_test_repo_for(_OWNER)
+    if not test_repo:
         raise _Skip(
-            "GITHUB_TEST_REPO не задан — укажите тестовый репозиторий "
-            "(например ваш-логин/selftest-repo), чтобы включить эту проверку"
+            "Тестовый репозиторий не задан — настройте командой боту: "
+            "/setgithubtest ваш-логин/selftest-repo"
         )
 
     branch = f"selftest-{int(_time.time())}"
     result = gh.push_file_to_branch(
-        _OWNER, config.GITHUB_TEST_REPO, branch, "selftest.txt",
+        _OWNER, test_repo, branch, "selftest.txt",
         "ping from /selftest_all", "Selftest ping (auto-cleanup)",
     )
     # Убираем за собой — тестовый репозиторий не должен зарастать ветками.
-    gh._request(_OWNER, "DELETE", f"/repos/{config.GITHUB_TEST_REPO}/git/refs/heads/{branch}")
+    gh._request(_OWNER, "DELETE", f"/repos/{test_repo}/git/refs/heads/{branch}")
     return f"branch+commit+delete прошли ({result.get('file_html_url', '')})"
 
 

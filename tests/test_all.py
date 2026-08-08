@@ -177,23 +177,33 @@ class TestSelfMemory(IsolatedDBTestCase):
     def test_remember_forget_recall(self):
         from modules.memory import self_memory
 
-        self_memory.remember("name", "Джарвис")
-        self.assertEqual(self_memory.recall_all(), {"name": "Джарвис"})
-        self.assertIn("Джарвис", self_memory.as_prompt_block())
+        self_memory.remember(1, "name", "Джарвис")
+        self.assertEqual(self_memory.recall_all(1), {"name": "Джарвис"})
+        self.assertIn("Джарвис", self_memory.as_prompt_block(1))
 
-        self.assertTrue(self_memory.forget("name"))
-        self.assertEqual(self_memory.recall_all(), {})
-        self.assertFalse(self_memory.forget("name"))  # уже нечего забывать
-        self.assertEqual(self_memory.as_prompt_block(), "")
+        self.assertTrue(self_memory.forget(1, "name"))
+        self.assertEqual(self_memory.recall_all(1), {})
+        self.assertFalse(self_memory.forget(1, "name"))  # уже нечего забывать
+        self.assertEqual(self_memory.as_prompt_block(1), "")
+
+    def test_remember_is_isolated_per_chat_id(self):
+        from modules.memory import self_memory
+
+        self_memory.remember(1, "name", "Джарвис")
+        self_memory.remember(2, "name", "Алиса")
+        self.assertEqual(self_memory.recall_all(1), {"name": "Джарвис"})
+        self.assertEqual(self_memory.recall_all(2), {"name": "Алиса"})
+        self.assertTrue(self_memory.forget(1, "name"))
+        self.assertEqual(self_memory.recall_all(2), {"name": "Алиса"})  # чужая запись не пострадала
 
     def test_extract_remember_tags(self):
         from modules.memory import self_memory
 
         text = "Ок! [REMEMBER: name=Джарвис] Дальше текст. [REMEMBER: mood=бодрый]"
-        cleaned, facts = self_memory.extract_remember_tags(text)
+        cleaned, facts = self_memory.extract_remember_tags(1, text)
         self.assertEqual(facts, {"name": "Джарвис", "mood": "бодрый"})
         self.assertNotIn("REMEMBER", cleaned)
-        self.assertEqual(self_memory.recall_all(), {"name": "Джарвис", "mood": "бодрый"})
+        self.assertEqual(self_memory.recall_all(1), {"name": "Джарвис", "mood": "бодрый"})
 
 
 # ────────────────────────── История диалога + компактор ──────────────────────────
@@ -343,32 +353,32 @@ class TestSearchProviders(IsolatedDBTestCase):
         from modules.search.errors import SearchError
 
         config.KEENABLE_API_KEY = ""
-        search_service.set_active_provider("keenable")
+        search_service.set_active_provider(1, "keenable")
         with self.assertRaises(SearchError):
-            search_service.search("тест")
+            search_service.search(1, "тест")
 
     def test_searxng_without_url_raises_clear_error(self):
         from modules.search import service as search_service
         from modules.search.errors import SearchError
 
         config.SEARXNG_BASE_URL = ""
-        search_service.set_active_provider("searxng")
+        search_service.set_active_provider(1, "searxng")
         with self.assertRaises(SearchError):
-            search_service.search("тест")
+            search_service.search(1, "тест")
 
     def test_unknown_provider_rejected(self):
         from modules.search import service as search_service
         from modules.search.errors import SearchError
 
         with self.assertRaises(SearchError):
-            search_service.set_active_provider("bing")
+            search_service.set_active_provider(1, "bing")
 
     def test_switch_persists_and_searxng_call_shape(self):
         from modules.search import service as search_service
 
         config.SEARXNG_BASE_URL = "http://localhost:8080"
-        search_service.set_active_provider("searxng")
-        self.assertEqual(search_service.get_active_provider_name(), "searxng")
+        search_service.set_active_provider(1, "searxng")
+        self.assertEqual(search_service.get_active_provider_name(1), "searxng")
 
         captured = {}
 
@@ -379,7 +389,7 @@ class TestSearchProviders(IsolatedDBTestCase):
             return FakeResponse(json.dumps(payload).encode())
 
         with mock.patch("urllib.request.urlopen", fake_urlopen):
-            results = search_service.search("погода")
+            results = search_service.search(1, "погода")
 
         self.assertEqual(results, [{"title": "Погода", "url": "https://x.example", "snippet": "18°C"}])
         self.assertEqual(captured["method"], "GET")
@@ -398,9 +408,9 @@ class TestSearchProviders(IsolatedDBTestCase):
                 raise SearchError("временный сбой, например холодный старт")
             return [{"title": "T", "url": "https://x", "snippet": "s"}]
 
-        search_service.set_active_provider("keenable")
+        search_service.set_active_provider(1, "keenable")
         with mock.patch.object(search_service._PROVIDERS["keenable"], "search", flaky):
-            results = search_service.search("тест")
+            results = search_service.search(1, "тест")
 
         self.assertEqual(attempts["n"], 2)
         self.assertEqual(results[0]["title"], "T")
@@ -415,10 +425,10 @@ class TestSearchProviders(IsolatedDBTestCase):
             attempts["n"] += 1
             raise SearchConfigError("ключ не задан")
 
-        search_service.set_active_provider("keenable")
+        search_service.set_active_provider(1, "keenable")
         with mock.patch.object(search_service._PROVIDERS["keenable"], "search", always_config_error):
             with self.assertRaises(SearchConfigError):
-                search_service.search("тест")
+                search_service.search(1, "тест")
 
         self.assertEqual(attempts["n"], 1)  # без повторной попытки
 
@@ -442,14 +452,14 @@ class TestLLMClientAndModels(IsolatedDBTestCase):
             return FakeResponse(json.dumps(payload).encode())
 
         with mock.patch("urllib.request.urlopen", fake_urlopen):
-            reply = chat_completion([{"role": "user", "content": "привет"}])
+            reply = chat_completion(1, [{"role": "user", "content": "привет"}])
 
         self.assertEqual(reply, "Привет! Чем помочь?")
         self.assertTrue(captured["url"].endswith("/chat/completions"))
-        self.assertEqual(captured["body"]["model"], get_active_model())
+        self.assertEqual(captured["body"]["model"], get_active_model(1))
         self.assertIn("Bearer", captured["auth"])
 
-        totals = db.usage_today_totals()
+        totals = db.usage_today_totals(1)
         self.assertEqual(totals["requests"], 1)
         self.assertEqual(totals["tokens"], 15)
 
@@ -467,7 +477,7 @@ class TestLLMClientAndModels(IsolatedDBTestCase):
 
         with mock.patch("urllib.request.urlopen", fake_urlopen), \
              mock.patch("time.sleep", lambda s: None):
-            reply = chat_completion([{"role": "user", "content": "hi"}])
+            reply = chat_completion(1, [{"role": "user", "content": "hi"}])
 
         self.assertEqual(reply, "ok")
         self.assertEqual(attempts["n"], 2)
@@ -488,8 +498,8 @@ class TestLLMClientAndModels(IsolatedDBTestCase):
             return FakeResponse(json.dumps(payload).encode())
 
         with mock.patch("urllib.request.urlopen", fake_urlopen):
-            all_models = llm_models.list_models()
-            free_models = llm_models.list_free_models()
+            all_models = llm_models.list_models(1)
+            free_models = llm_models.list_free_models(1)
 
         self.assertEqual(len(all_models), 3)
         self.assertEqual([m["id"] for m in free_models], ["meta-llama/llama-3.3-70b:free"])
@@ -499,10 +509,10 @@ class TestLLMClientAndModels(IsolatedDBTestCase):
     def test_set_and_get_active_model_persists(self):
         from llm.client import get_active_model, set_active_model
 
-        default = get_active_model()
+        default = get_active_model(1)
         self.assertEqual(default, config.LLM_MODEL)
-        set_active_model("some/other-model")
-        self.assertEqual(get_active_model(), "some/other-model")
+        set_active_model(1, "some/other-model")
+        self.assertEqual(get_active_model(1), "some/other-model")
 
     def test_price_hints_capture_nonstandard_fields(self):
         import llm.models as llm_models
@@ -517,7 +527,7 @@ class TestLLMClientAndModels(IsolatedDBTestCase):
             return FakeResponse(json.dumps(payload).encode())
 
         with mock.patch("urllib.request.urlopen", fake_urlopen):
-            hints = llm_models.list_price_hints()
+            hints = llm_models.list_price_hints(1)
 
         self.assertEqual(len(hints), 2)
         self.assertIn("cost_rub_per_1k", hints[0])
@@ -539,14 +549,14 @@ class TestModelFilter(IsolatedDBTestCase):
             }
             return FakeResponse(json.dumps(payload).encode())
 
-        def fake_chat_completion(messages, **kw):
+        def fake_chat_completion(chat_id, messages, **kw):
             payload = json.loads(messages[1]["content"])
             self.assertIn("cost_rub_per_1k", payload[0])
             return "clavis/free-one"
 
         with mock.patch("urllib.request.urlopen", fake_urlopen), \
              mock.patch.object(model_filter, "chat_completion", fake_chat_completion):
-            result = model_filter.classify_free_models()
+            result = model_filter.classify_free_models(1)
 
         self.assertEqual([m["id"] for m in result], ["clavis/free-one"])
 
@@ -561,12 +571,12 @@ class TestModelFilter(IsolatedDBTestCase):
             return FakeResponse(json.dumps(payload).encode())
 
         with mock.patch("urllib.request.urlopen", fake_urlopen), \
-             mock.patch.object(model_filter, "chat_completion", lambda messages, **kw: "a/free:free"):
-            model_filter.classify_free_models()
-            model_filter.classify_free_models()  # из кэша, без новых вызовов
+             mock.patch.object(model_filter, "chat_completion", lambda chat_id, messages, **kw: "a/free:free"):
+            model_filter.classify_free_models(1)
+            model_filter.classify_free_models(1)  # из кэша, без новых вызовов
             self.assertEqual(fetch_calls["n"], 1)
 
-            model_filter.classify_free_models(force_refresh=True)
+            model_filter.classify_free_models(1, force_refresh=True)
             self.assertEqual(fetch_calls["n"], 2)
 
     def test_falls_back_to_heuristic_when_llm_fails(self):
@@ -582,12 +592,12 @@ class TestModelFilter(IsolatedDBTestCase):
             }
             return FakeResponse(json.dumps(payload).encode())
 
-        def failing_chat_completion(messages, **kw):
+        def failing_chat_completion(chat_id, messages, **kw):
             raise LLMError("модель недоступна")
 
         with mock.patch("urllib.request.urlopen", fake_urlopen), \
              mock.patch.object(model_filter, "chat_completion", failing_chat_completion):
-            result = model_filter.classify_free_models()
+            result = model_filter.classify_free_models(1)
 
         self.assertEqual([m["id"] for m in result], ["a/free:free"])  # эвристика по :free
 
@@ -599,7 +609,7 @@ class TestPrompts(unittest.TestCase):
         import llm.prompts as prompts
         from datetime import datetime
 
-        prompt = prompts.build_system_prompt()
+        prompt = prompts.build_system_prompt(1)
         self.assertIn("Текущие дата и время", prompt)
         self.assertIn(str(datetime.now().year), prompt)
         self.assertIn(config.USER_TIMEZONE, prompt)
@@ -608,8 +618,8 @@ class TestPrompts(unittest.TestCase):
         import llm.prompts as prompts
         from llm.client import get_active_model
 
-        prompt = prompts.build_system_prompt()
-        self.assertIn(get_active_model(), prompt)
+        prompt = prompts.build_system_prompt(1)
+        self.assertIn(get_active_model(1), prompt)
         self.assertIn(config.LLM_BASE_URL, prompt)
         self.assertIn("личного Telegram-агента", prompt)
 
@@ -623,7 +633,7 @@ class TestFallback(IsolatedDBTestCase):
         from llm import fallback, model_filter
         from llm.client import LLMError
 
-        def fake_chat_completion(messages, max_tokens=1000, temperature=0.7,
+        def fake_chat_completion(chat_id, messages, max_tokens=1000, temperature=0.7,
                                   profile_name=None, model=None):
             if model == config.LLM_MODEL:
                 raise LLMError("модель временно недоступна")
@@ -633,9 +643,9 @@ class TestFallback(IsolatedDBTestCase):
 
         with mock.patch.object(
             model_filter, "classify_free_models",
-            lambda force_refresh=False: [{"id": "or/free-backup", "name": "Backup"}],
+            lambda chat_id, force_refresh=False: [{"id": "or/free-backup", "name": "Backup"}],
         ), mock.patch.object(fallback, "chat_completion", fake_chat_completion):
-            result = fallback.resilient_chat_completion([{"role": "user", "content": "hi"}])
+            result = fallback.resilient_chat_completion(1, [{"role": "user", "content": "hi"}])
 
         self.assertEqual(result.text, "ответ от резерва")
         self.assertTrue(result.used_fallback)
@@ -645,17 +655,17 @@ class TestFallback(IsolatedDBTestCase):
         from llm import fallback, providers, model_filter
         from llm.client import LLMError
 
-        providers.add_profile("clavis", "https://api.clavis.to/v1", "sk-1", "clavis/m")
+        providers.add_profile(1, "clavis", "https://api.clavis.to/v1", "sk-1", "clavis/m")
 
-        def fake_chat_completion(messages, max_tokens=1000, temperature=0.7,
+        def fake_chat_completion(chat_id, messages, max_tokens=1000, temperature=0.7,
                                   profile_name=None, model=None):
             if profile_name == "default":
                 raise LLMError("весь провайдер лежит")
             return "ответ от clavis"
 
-        with mock.patch.object(model_filter, "classify_free_models", lambda force_refresh=False: []), \
+        with mock.patch.object(model_filter, "classify_free_models", lambda chat_id, force_refresh=False: []), \
              mock.patch.object(fallback, "chat_completion", fake_chat_completion):
-            result = fallback.resilient_chat_completion([{"role": "user", "content": "hi"}])
+            result = fallback.resilient_chat_completion(1, [{"role": "user", "content": "hi"}])
 
         self.assertEqual(result.profile_name, "clavis")
         self.assertTrue(result.used_fallback)
@@ -663,8 +673,8 @@ class TestFallback(IsolatedDBTestCase):
     def test_no_fallback_needed_when_active_model_works(self):
         from llm import fallback
 
-        with mock.patch.object(fallback, "chat_completion", lambda messages, **kw: "ok сразу"):
-            result = fallback.resilient_chat_completion([{"role": "user", "content": "hi"}])
+        with mock.patch.object(fallback, "chat_completion", lambda chat_id, messages, **kw: "ok сразу"):
+            result = fallback.resilient_chat_completion(1, [{"role": "user", "content": "hi"}])
 
         self.assertEqual(result.text, "ok сразу")
         self.assertFalse(result.used_fallback)
@@ -673,14 +683,14 @@ class TestFallback(IsolatedDBTestCase):
         from llm import fallback, providers
         from llm.client import LLMError
 
-        providers.add_profile("clavis", "https://api.clavis.to/v1", "sk-1", "clavis/m")
+        providers.add_profile(1, "clavis", "https://api.clavis.to/v1", "sk-1", "clavis/m")
 
-        def always_fails(messages, **kw):
+        def always_fails(chat_id, messages, **kw):
             raise LLMError("недоступно")
 
         with mock.patch.object(fallback, "chat_completion", always_fails):
             with self.assertRaises(fallback.AllProvidersFailedError):
-                fallback.resilient_chat_completion([{"role": "user", "content": "hi"}])
+                fallback.resilient_chat_completion(1, [{"role": "user", "content": "hi"}])
 
     def test_orchestrator_uses_fallback_transparently(self):
         """orchestrator.chat_completion теперь = resilient-обёртка, но
@@ -689,7 +699,7 @@ class TestFallback(IsolatedDBTestCase):
         import llm.orchestrator as orchestrator
         from llm.client import LLMError
 
-        def fake_low_level(messages, max_tokens=1000, temperature=0.7,
+        def fake_low_level(chat_id, messages, max_tokens=1000, temperature=0.7,
                            profile_name=None, model=None):
             if model == config.LLM_MODEL:
                 raise LLMError("недоступна")
@@ -697,7 +707,7 @@ class TestFallback(IsolatedDBTestCase):
 
         with mock.patch(
             "llm.model_filter.classify_free_models",
-            lambda force_refresh=False: [{"id": "or/free-backup", "name": "Backup"}],
+            lambda chat_id, force_refresh=False: [{"id": "or/free-backup", "name": "Backup"}],
         ), mock.patch("llm.fallback.chat_completion", fake_low_level):
             reply = orchestrator.get_reply(1, "привет")
 
@@ -708,61 +718,61 @@ class TestProviders(IsolatedDBTestCase):
     def test_default_profile_uses_config(self):
         from llm import providers
 
-        self.assertEqual(providers.list_profile_names(), ["default"])
-        self.assertEqual(providers.get_active_profile_name(), "default")
+        self.assertEqual(providers.list_profile_names(1), ["default"])
+        self.assertEqual(providers.get_active_profile_name(1), "default")
         self.assertEqual(
-            providers.get_active_credentials(), (config.LLM_BASE_URL, config.LLM_API_KEY)
+            providers.get_active_credentials(1), (config.LLM_BASE_URL, config.LLM_API_KEY)
         )
 
     def test_add_switch_and_remove_profile(self):
         from llm import providers
 
-        providers.add_profile("clavis", "https://api.clavis.to/v1", "sk-123", "clavis/model-x")
-        self.assertIn("clavis", providers.list_profile_names())
+        providers.add_profile(1, "clavis", "https://api.clavis.to/v1", "sk-123", "clavis/model-x")
+        self.assertIn("clavis", providers.list_profile_names(1))
 
-        providers.set_active_profile("clavis")
-        self.assertEqual(providers.get_active_profile_name(), "clavis")
+        providers.set_active_profile(1, "clavis")
+        self.assertEqual(providers.get_active_profile_name(1), "clavis")
         self.assertEqual(
-            providers.get_active_credentials(), ("https://api.clavis.to/v1", "sk-123")
+            providers.get_active_credentials(1), ("https://api.clavis.to/v1", "sk-123")
         )
 
-        self.assertTrue(providers.remove_profile("clavis"))
+        self.assertTrue(providers.remove_profile(1, "clavis"))
         # Удалили активный профиль -> откат на default
-        self.assertEqual(providers.get_active_profile_name(), "default")
+        self.assertEqual(providers.get_active_profile_name(1), "default")
 
     def test_cannot_overwrite_or_switch_to_unknown(self):
         from llm import providers
         from llm.providers import ProviderError
 
         with self.assertRaises(ProviderError):
-            providers.add_profile("default", "https://x", "key")
+            providers.add_profile(1, "default", "https://x", "key")
         with self.assertRaises(ProviderError):
-            providers.set_active_profile("does-not-exist")
+            providers.set_active_profile(1, "does-not-exist")
 
     def test_model_is_remembered_per_profile(self):
         from llm import providers
         from llm.client import get_active_model, set_active_model
 
-        default_model = get_active_model()
-        providers.add_profile("clavis", "https://api.clavis.to/v1", "sk-123", "clavis/default")
-        providers.set_active_profile("clavis")
-        self.assertEqual(get_active_model(), "clavis/default")
+        default_model = get_active_model(1)
+        providers.add_profile(1, "clavis", "https://api.clavis.to/v1", "sk-123", "clavis/default")
+        providers.set_active_profile(1, "clavis")
+        self.assertEqual(get_active_model(1), "clavis/default")
 
-        set_active_model("clavis/other")
-        self.assertEqual(get_active_model(), "clavis/other")
+        set_active_model(1, "clavis/other")
+        self.assertEqual(get_active_model(1), "clavis/other")
 
-        providers.set_active_profile("default")
-        self.assertEqual(get_active_model(), default_model)  # не перепуталось с clavis
+        providers.set_active_profile(1, "default")
+        self.assertEqual(get_active_model(1), default_model)  # не перепуталось с clavis
 
-        providers.set_active_profile("clavis")
-        self.assertEqual(get_active_model(), "clavis/other")  # не потерялось
+        providers.set_active_profile(1, "clavis")
+        self.assertEqual(get_active_model(1), "clavis/other")  # не потерялось
 
     def test_chat_completion_uses_active_profile_credentials(self):
         from llm import providers
         from llm.client import chat_completion
 
-        providers.add_profile("clavis", "https://api.clavis.to/v1", "sk-clavis", "clavis/m")
-        providers.set_active_profile("clavis")
+        providers.add_profile(1, "clavis", "https://api.clavis.to/v1", "sk-clavis", "clavis/m")
+        providers.set_active_profile(1, "clavis")
 
         captured = {}
 
@@ -773,7 +783,7 @@ class TestProviders(IsolatedDBTestCase):
             return FakeResponse(json.dumps(payload).encode())
 
         with mock.patch("urllib.request.urlopen", fake_urlopen):
-            chat_completion([{"role": "user", "content": "hi"}])
+            chat_completion(1, [{"role": "user", "content": "hi"}])
 
         self.assertTrue(captured["url"].startswith("https://api.clavis.to/v1"))
         self.assertEqual(captured["auth"], "Bearer sk-clavis")
@@ -809,9 +819,9 @@ class TestDiagnostics(IsolatedDBTestCase):
         import modules.diagnostics.service as diagnostics
 
         config.GITHUB_TOKEN = ""  # тестовое окружение обычно задаёт токен глобально — тут проверяем путь "не настроено"
-        with mock.patch("llm.client.chat_completion", lambda messages, **kw: "тест"), \
-             mock.patch("modules.search.service.search", lambda q, max_results=5, **kw: [{"title": "T"}]), \
-             mock.patch("modules.search.service.get_active_provider_name", lambda: "keenable"):
+        with mock.patch("llm.client.chat_completion", lambda chat_id, messages, **kw: "тест"), \
+             mock.patch("modules.search.service.search", lambda chat_id, q, max_results=5, **kw: [{"title": "T"}]), \
+             mock.patch("modules.search.service.get_active_provider_name", lambda chat_id: "keenable"):
             report = diagnostics.run_selftest()
 
         self.assertIn("✅ База данных", report)
@@ -824,10 +834,10 @@ class TestDiagnostics(IsolatedDBTestCase):
         import modules.diagnostics.service as diagnostics
 
         config.GITHUB_TOKEN = "ghp_test"
-        with mock.patch("llm.client.chat_completion", lambda messages, **kw: "тест"), \
-             mock.patch("modules.search.service.search", lambda q, max_results=5, **kw: []), \
-             mock.patch("modules.search.service.get_active_provider_name", lambda: "keenable"), \
-             mock.patch("modules.github.service._request", lambda method, path: {"rate": {"remaining": 4999}}):
+        with mock.patch("llm.client.chat_completion", lambda chat_id, messages, **kw: "тест"), \
+             mock.patch("modules.search.service.search", lambda chat_id, q, max_results=5, **kw: []), \
+             mock.patch("modules.search.service.get_active_provider_name", lambda chat_id: "keenable"), \
+             mock.patch("modules.github.service._request", lambda chat_id, method, path: {"rate": {"remaining": 4999}}):
             report = diagnostics.run_selftest()
 
         self.assertIn("✅ GitHub", report)
@@ -837,7 +847,7 @@ class TestDiagnostics(IsolatedDBTestCase):
         import modules.diagnostics.service as diagnostics
         from llm.client import LLMError
 
-        def failing_llm(messages, **kw):
+        def failing_llm(chat_id, messages, **kw):
             raise LLMError("недоступна")
 
         with mock.patch("llm.client.chat_completion", failing_llm):
@@ -917,10 +927,10 @@ class TestDiagnostics(IsolatedDBTestCase):
         import modules.diagnostics.service as diagnostics
 
         config.GITHUB_TOKEN = ""
-        with mock.patch("llm.client.chat_completion", lambda messages, **kw: "тест"), \
-             mock.patch("modules.search.service.search", lambda q, max_results=5, **kw: []), \
-             mock.patch("modules.search.service.get_active_provider_name", lambda: "keenable"), \
-             mock.patch("llm.models.list_models", lambda: [{"id": "a", "name": "A", "free": True}]):
+        with mock.patch("llm.client.chat_completion", lambda chat_id, messages, **kw: "тест"), \
+             mock.patch("modules.search.service.search", lambda chat_id, q, max_results=5, **kw: []), \
+             mock.patch("modules.search.service.get_active_provider_name", lambda chat_id: "keenable"), \
+             mock.patch("llm.models.list_models", lambda chat_id: [{"id": "a", "name": "A", "free": True}]):
             report = diagnostics.run_selftest_all()
 
         self.assertIn("Cron / напоминания", report)
@@ -939,7 +949,7 @@ class TestOrchestrator(IsolatedDBTestCase):
         from modules.conversations import service as conversations
 
         with mock.patch.object(
-            orchestrator, "chat_completion", lambda messages, **kw: "Привет! Всё хорошо."
+            orchestrator, "chat_completion", lambda chat_id, messages, **kw: "Привет! Всё хорошо."
         ):
             reply = orchestrator.get_reply(1, "как дела?")
 
@@ -954,19 +964,19 @@ class TestOrchestrator(IsolatedDBTestCase):
 
         with mock.patch.object(
             orchestrator, "chat_completion",
-            lambda messages, **kw: "Ок! [REMEMBER: name=Джарвис]",
+            lambda chat_id, messages, **kw: "Ок! [REMEMBER: name=Джарвис]",
         ):
             reply = orchestrator.get_reply(1, "тебя зовут Джарвис")
 
         self.assertNotIn("REMEMBER", reply)
-        self.assertEqual(self_memory.recall_all().get("name"), "Джарвис")
+        self.assertEqual(self_memory.recall_all(1).get("name"), "Джарвис")
 
     def test_search_tag_triggers_refine_then_second_call_with_results(self):
         import llm.orchestrator as orchestrator
 
         calls = {"main": 0, "refine": 0}
 
-        def fake_chat_completion(messages, **kw):
+        def fake_chat_completion(chat_id, messages, **kw):
             if "Ты помогаешь сформулировать" in messages[0]["content"]:
                 calls["refine"] += 1
                 return "amsterdam weather today"
@@ -978,7 +988,7 @@ class TestOrchestrator(IsolatedDBTestCase):
             self.assertTrue(any("amsterdam weather today" in m["content"] for m in messages))
             return "Сейчас в Амстердаме облачно, 18°C."
 
-        def fake_search(query, max_results=5, **kw):
+        def fake_search(chat_id, query, max_results=5, **kw):
             self.assertEqual(query, "amsterdam weather today")  # именно уточнённый
             return [{"title": "Погода", "url": "https://x.example", "snippet": "18°C, облачно"}]
 
@@ -996,7 +1006,7 @@ class TestOrchestrator(IsolatedDBTestCase):
 
         searched_queries = []
 
-        def fake_chat_completion(messages, **kw):
+        def fake_chat_completion(chat_id, messages, **kw):
             if "Ты помогаешь сформулировать" in messages[0]["content"]:
                 draft = messages[1]["content"].replace("Черновой запрос: ", "")
                 return f"{draft} (refined)"
@@ -1007,7 +1017,7 @@ class TestOrchestrator(IsolatedDBTestCase):
                 return "Вот оба ответа сразу."
             return "[SEARCH: погода Амстердам][SEARCH: курс евро]"
 
-        def fake_search(query, max_results=5, **kw):
+        def fake_search(chat_id, query, max_results=5, **kw):
             searched_queries.append(query)
             return [{"title": "T", "url": "https://x", "snippet": query}]
 
@@ -1026,7 +1036,7 @@ class TestOrchestrator(IsolatedDBTestCase):
         config.SEARCH_MAX_QUERIES_PER_TURN = 2
         refine_calls = {"n": 0}
 
-        def fake_chat_completion(messages, **kw):
+        def fake_chat_completion(chat_id, messages, **kw):
             if "Ты помогаешь сформулировать" in messages[0]["content"]:
                 refine_calls["n"] += 1
                 return f"refined-{refine_calls['n']}"
@@ -1035,7 +1045,7 @@ class TestOrchestrator(IsolatedDBTestCase):
                 return "Готово."
             return "[SEARCH: a][SEARCH: b][SEARCH: c][SEARCH: d][SEARCH: e]"
 
-        def fake_search(query, max_results=5, **kw):
+        def fake_search(chat_id, query, max_results=5, **kw):
             return [{"title": "T", "url": "https://x", "snippet": "s"}]
 
         with mock.patch.object(orchestrator, "chat_completion", fake_chat_completion), \
@@ -1071,7 +1081,7 @@ class TestGitHubService(unittest.TestCase):
             raise AssertionError(f"Неожиданный запрос: {method} {url}")
 
         with mock.patch("urllib.request.urlopen", fake_urlopen):
-            result = gh.push_file_to_branch("o/r", "new-feature", "f.py", "print(1)\n", "msg")
+            result = gh.push_file_to_branch(1, "o/r", "new-feature", "f.py", "print(1)\n", "msg")
 
         self.assertTrue(result["created_branch"])
         self.assertIn("new-feature", result["branch_url"])
@@ -1104,7 +1114,7 @@ class TestGitHubService(unittest.TestCase):
 
         with mock.patch("urllib.request.urlopen", fake_urlopen):
             result = gh.push_files_to_branch(
-                "o/r", "multi", {"a.py": "print('a')", "b.py": "print('b')"}, "msg"
+                1, "o/r", "multi", {"a.py": "print('a')", "b.py": "print('b')"}, "msg"
             )
 
         self.assertEqual(blob_calls["n"], 2)  # ровно два blob'а — по одному на файл
@@ -1145,13 +1155,13 @@ class TestGitHubEditor(unittest.TestCase):
 
         edit_fn = mock.patch.object(
             editor, "chat_completion",
-            lambda messages, **kw: "===FILE: src/app.py===\nprint('new')\n===END===",
+            lambda chat_id, messages, **kw: "===FILE: src/app.py===\nprint('new')\n===END===",
         )
         edit_fn.start()
         self.addCleanup(edit_fn.stop)
 
         with mock.patch("urllib.request.urlopen", fake_urlopen):
-            result = editor.edit_files("o/r", "feature-edit", ["src/app.py"], "почини баг")
+            result = editor.edit_files(1, "o/r", "feature-edit", ["src/app.py"], "почини баг")
 
         self.assertEqual(result["files"], ["src/app.py"])
         self.assertTrue(result["created_branch"])
@@ -1169,14 +1179,14 @@ class TestGitHubEditor(unittest.TestCase):
 
         edit_fn = mock.patch.object(
             editor, "chat_completion",
-            lambda messages, **kw: "===FILE: другой/файл.py===\nсодержимое\n===END===",
+            lambda chat_id, messages, **kw: "===FILE: другой/файл.py===\nсодержимое\n===END===",
         )
         edit_fn.start()
         self.addCleanup(edit_fn.stop)
 
         with mock.patch("urllib.request.urlopen", fake_urlopen):
             with self.assertRaises(editor.EditError):
-                editor.edit_files("o/r", "branch", ["src/app.py"], "запрос")
+                editor.edit_files(1, "o/r", "branch", ["src/app.py"], "запрос")
 
 
 # ────────────────────────── Ветки диалогов (шаг 7) ──────────────────────────
@@ -1367,9 +1377,35 @@ class TestRouterCommands(IsolatedDBTestCase):
     def _upd(self, text, chat_id=1):
         return {"message": {"chat": {"id": chat_id}, "text": text}}
 
-    def test_stranger_is_ignored(self):
+    def test_stranger_gets_access_request_and_owner_is_notified(self):
         self.router.handle_update(self._upd("привет", chat_id=999))
-        self.assertEqual(self.sent, [])
+        self.assertEqual(len(self.sent), 2)
+        stranger_msg = next(t for cid, t in self.sent if cid == 999)
+        owner_msg = next(t for cid, t in self.sent if str(cid) == str(config.OWNER_CHAT_ID))
+        self.assertIn("Заявка на доступ", stranger_msg)
+        self.assertIn("Новая заявка", owner_msg)
+        self.assertIn("999", owner_msg)
+
+        # Повторное сообщение от того же chat_id — уже не шлёт новую
+        # заявку создателю, просто напоминает, что заявка на рассмотрении.
+        self.sent.clear()
+        self.router.handle_update(self._upd("ещё раз", chat_id=999))
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("уже отправлена", self.sent[0][1])
+
+    def test_owner_only_commands_rejected_for_approved_user(self):
+        from modules.users import service as users_service
+
+        users_service.approve(2, "user", approved_by=1)
+        self.router.handle_update(self._upd("/status", chat_id=2))
+        self.assertTrue(any("только создателю" in t for cid, t in self.sent if cid == 2))
+
+    def test_approved_user_can_use_bot_with_isolated_settings(self):
+        from modules.users import service as users_service
+
+        users_service.approve(2, "user", approved_by=1)
+        self.router.handle_update(self._upd("/setsearch searxng", chat_id=2))
+        self.assertTrue(any("searxng" in t for cid, t in self.sent if cid == 2))
 
     def test_start_and_notes_flow(self):
         self.router.handle_update(self._upd("/start"))
@@ -1398,14 +1434,14 @@ class TestRouterCommands(IsolatedDBTestCase):
     def test_history_compressed_by_default_and_full_on_request(self):
         long_filler = "текст для объёма " * 15  # ~250 символов на сообщение
         with mock.patch.object(
-            self.router.orchestrator, "chat_completion", lambda messages, **kw: "ответ на сообщение " + long_filler
+            self.router.orchestrator, "chat_completion", lambda chat_id, messages, **kw: "ответ на сообщение " + long_filler
         ):
             for i in range(15):
                 self.router.handle_update(self._upd(f"вопрос номер {i} {long_filler}"))
         self.sent.clear()
 
         with mock.patch.object(
-            self.router.orchestrator, "compress_text", lambda text, max_length=3600: "СЖАТАЯ ИСТОРИЯ"
+            self.router.orchestrator, "compress_text", lambda chat_id, text, max_length=3600: "СЖАТАЯ ИСТОРИЯ"
         ):
             self.router.handle_update(self._upd("/history"))
         self.assertEqual(len(self.sent), 1)
@@ -1439,7 +1475,7 @@ class TestRouterCommands(IsolatedDBTestCase):
             return FakeResponse(json.dumps(payload).encode())
 
         with mock.patch("urllib.request.urlopen", fake_urlopen), \
-             mock.patch.object(self.router.model_filter, "chat_completion", lambda m, **kw: "a/free:free"):
+             mock.patch.object(self.router.model_filter, "chat_completion", lambda chat_id, m, **kw: "a/free:free"):
             self.router.handle_update(self._upd("/models_all"))
             self.router.handle_update(self._upd("/models_free"))
             self.router.handle_update(self._upd("/models"))
@@ -1459,9 +1495,15 @@ class TestRouterCommands(IsolatedDBTestCase):
         self.router.handle_update(self._upd("/status"))
         self.assertTrue(any("Память" in t for _, t in self.sent))
 
+    def test_usage_command_is_personal(self):
+        db.log_usage(1, "test/default-model", "default", 5, 5, 10)
+        db.log_usage(2, "test/default-model", "default", 100, 100, 200)
+        self.router.handle_update(self._upd("/usage"))
+        self.assertTrue(any("10" in t and "200" not in t for _, t in self.sent))
+
     def test_dialog_commands(self):
         with mock.patch.object(
-            self.router.orchestrator, "chat_completion", lambda messages, **kw: "ответ"
+            self.router.orchestrator, "chat_completion", lambda chat_id, messages, **kw: "ответ"
         ):
             self.router.handle_update(self._upd("первое сообщение"))
         self.router.handle_update(self._upd("/dialogs"))
@@ -1495,7 +1537,7 @@ class TestRouterCommands(IsolatedDBTestCase):
     def test_default_text_goes_through_llm(self):
         import llm.orchestrator as orchestrator
         with mock.patch.object(
-            orchestrator, "chat_completion", lambda messages, **kw: "Простой ответ модели."
+            orchestrator, "chat_completion", lambda chat_id, messages, **kw: "Простой ответ модели."
         ):
             self.router.handle_update(self._upd("привет, бот"))
         self.assertTrue(any("Простой ответ модели" in t for _, t in self.sent))
@@ -1503,6 +1545,59 @@ class TestRouterCommands(IsolatedDBTestCase):
     def test_pushcode_bad_format_gives_usage(self):
         self.router.handle_update(self._upd("/pushcode без переноса строки"))
         self.assertTrue(any("Использование" in t for _, t in self.sent))
+
+    def test_setsearchkey_and_setgithub_are_personal(self):
+        from modules.search import service as search_service
+        from modules.github import service as gh_service
+
+        self.router.handle_update(self._upd("/setsearchkey keenable my-secret-key"))
+        self.assertTrue(any("сохран" in t.lower() for _, t in self.sent))
+        self.assertEqual(search_service.get_search_key(1, "keenable"), "my-secret-key")
+
+        self.sent.clear()
+        self.router.handle_update(self._upd("/setgithub ghp_mytoken main"))
+        self.assertTrue(any("GitHub-токен сохранён" in t for _, t in self.sent))
+        self.assertEqual(gh_service.get_token_for(1), "ghp_mytoken")
+
+    def test_users_approve_deny_block_flow(self):
+        self.router.handle_update(self._upd("привет", chat_id=555))  # заводит заявку
+        self.sent.clear()
+
+        self.router.handle_update(self._upd("/users"))
+        self.assertTrue(any("555" in t for _, t in self.sent))
+
+        self.sent.clear()
+        self.router.handle_update(self._upd("/approve 555 user"))
+        self.assertTrue(any("одобрен" in t.lower() for _, t in self.sent))
+        self.router.handle_update(self._upd("/status", chat_id=555))
+        self.assertTrue(any("только создателю" in t for cid, t in self.sent if cid == 555))
+
+        self.sent.clear()
+        self.router.handle_update(self._upd("/deny 555"))
+        self.assertTrue(any("Отклонено: 555" in t for _, t in self.sent))
+        self.sent.clear()
+        self.router.handle_update(self._upd("привет снова", chat_id=555))
+        self.assertTrue(any("отклонена" in t for cid, t in self.sent if cid == 555))
+
+        self.sent.clear()
+        self.router.handle_update(self._upd("/block 555"))
+        self.sent.clear()
+        self.router.handle_update(self._upd("что угодно", chat_id=555))
+        self.assertTrue(any("заблокирован" in t for cid, t in self.sent if cid == 555))
+
+    def test_llm_provider_and_search_keys_isolated_between_users(self):
+        from modules.users import service as users_service
+        from llm import providers
+
+        users_service.approve(2, "user", approved_by=1)
+
+        self.router.handle_update(self._upd(
+            "/addprovider clavis https://api.clavis.to/v1 sk-user2 clavis/m", chat_id=2
+        ))
+        # Пользователь 2 не видит "default" (только создатель), а
+        # создатель не видит личный профиль пользователя 2.
+        self.assertEqual(providers.list_profile_names(2), ["clavis"])
+        self.assertEqual(providers.list_profile_names(1), ["default"])
 
 
 # ────────────────────────── Точка входа ──────────────────────────

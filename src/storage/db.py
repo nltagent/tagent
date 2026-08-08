@@ -353,6 +353,24 @@ def get_setting(key: str, default: str | None = None) -> str | None:
     return row["value"] if row else default
 
 
+def get_or_create_secret(key: str, generator=None) -> str:
+    """Как get_setting(), но если значения ещё нет — генерирует
+    случайную строку (secrets.token_urlsafe), СРАЗУ сохраняет её в
+    settings и возвращает. Нужно для секретов, которые не обязаны
+    приходить из окружения (TELEGRAM_WEBHOOK_SECRET, CRON_SECRET):
+    бот сам придумывает их при первом старте, дальше просто читает
+    то же значение из базы при каждом следующем запуске контейнера.
+    generator — необязательная фабрика строки, по умолчанию
+    secrets.token_urlsafe(32)."""
+    existing = get_setting(key)
+    if existing:
+        return existing
+    import secrets as _secrets
+    value = generator() if generator else _secrets.token_urlsafe(32)
+    set_setting(key, value)
+    return value
+
+
 def set_setting(key: str, value: str) -> None:
     execute(
         """

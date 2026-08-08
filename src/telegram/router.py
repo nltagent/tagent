@@ -22,6 +22,7 @@ OWNER_CHAT_ID. Роли — user / vip / creator (см. modules/users/service.py
 from typing import Callable
 from datetime import datetime
 from zoneinfo import ZoneInfo
+import os
 import threading
 
 from config import config
@@ -80,7 +81,8 @@ def _cmd_help(chat_id: int | str, _args: str) -> None:
         "/users — список пользователей и заявок\n"
         "/approve <chat_id> user|vip — одобрить заявку\n"
         "/deny <chat_id> — отклонить заявку\n"
-        "/block <chat_id> — заблокировать пользователя\n\n"
+        "/block <chat_id> — заблокировать пользователя\n"
+        "/cronsecret — показать CRON_SECRET, /cronreset — перегенерировать\n\n"
         if is_owner else ""
     )
     status_block = (
@@ -130,6 +132,8 @@ def _cmd_help(chat_id: int | str, _args: str) -> None:
         f"{status_block}"
         "🐙 GitHub\n"
         "/setgithub <токен> [базовая_ветка] — ваш личный GitHub-токен\n"
+        "/setgithubtest владелец/репо — тестовый репозиторий для последней "
+        "проверки /selftest_all\n"
         "/pushcode owner/repo ветка путь/файл + код на след. строках — "
         "закоммитить готовый код\n"
         "/editcode owner/repo ветка + пути файлов + --- + инструкция — "
@@ -411,6 +415,32 @@ def _cmd_status(chat_id: int | str, _args: str) -> None:
     send_message(chat_id, monitoring_reporter.build_report())
 
 
+def _cmd_cronsecret(chat_id: int | str, _args: str) -> None:
+    source = "переменная окружения CRON_SECRET" if os.environ.get("CRON_SECRET") else "сгенерирован ботом автоматически"
+    send_message(
+        chat_id,
+        f"Текущий CRON_SECRET ({source}):\n"
+        f"`{config.CRON_SECRET}`\n\n"
+        "Впишите его в переменные окружения отдельного Cron Job сервиса "
+        "(заголовок X-Cron-Secret при вызове /internal/cron). Если "
+        "перегенерировать нужно — удалите значение из БД: /cronreset.",
+    )
+
+
+def _cmd_cronreset(chat_id: int | str, _args: str) -> None:
+    from storage.db import set_setting
+    import secrets as _secrets
+    new_secret = _secrets.token_urlsafe(32)
+    set_setting("cron_secret", new_secret)
+    config.CRON_SECRET = new_secret
+    send_message(
+        chat_id,
+        f"CRON_SECRET перегенерирован:\n`{new_secret}`\n\n"
+        "Не забудьте обновить его в Cron Job сервисе — старое значение "
+        "перестало работать немедленно.",
+    )
+
+
 def _cmd_selftest(chat_id: int | str, _args: str) -> None:
     send_message(
         chat_id,
@@ -586,6 +616,28 @@ def _cmd_setgithub(chat_id: int | str, args: str) -> None:
     github_service.set_credentials(chat_id, token, base_branch)
     suffix = f" Базовая ветка: {base_branch}" if base_branch else ""
     send_message(chat_id, f"GitHub-токен сохранён.{suffix}")
+
+
+def _cmd_setgithubtest(chat_id: int | str, args: str) -> None:
+    repo = args.strip()
+    if not repo:
+        current = github_service.get_test_repo_for(chat_id)
+        send_message(
+            chat_id,
+            "Использование: /setgithubtest владелец/репозиторий\n"
+            "Отдельный репозиторий для /selftest_all (последняя "
+            "проверка — реальные ветка+коммит+удаление, чтобы не "
+            "трогать рабочие репозитории). Заведите пустой репозиторий "
+            "специально под это и укажите его здесь, например:\n"
+            "/setgithubtest ваш-логин/selftest-repo\n\n"
+            f"Сейчас настроено: {current or '(не задано)'}",
+        )
+        return
+    if "/" not in repo:
+        send_message(chat_id, "Формат должен быть владелец/репозиторий, например octocat/hello-world.")
+        return
+    github_service.set_test_repo(chat_id, repo)
+    send_message(chat_id, f"Тестовый репозиторий сохранён: {repo}")
 
 
 def _cmd_pushcode(chat_id: int | str, args: str) -> None:
@@ -774,6 +826,8 @@ COMMANDS: dict[str, CommandHandler] = {
     "/reminders": _cmd_reminders,
     "/delremind": _cmd_delremind,
     "/status": _cmd_status,
+    "/cronsecret": _cmd_cronsecret,
+    "/cronreset": _cmd_cronreset,
     "/selftest": _cmd_selftest,
     "/selftest_all": _cmd_selftest_all,
     "/models": _cmd_models_free,
@@ -785,6 +839,7 @@ COMMANDS: dict[str, CommandHandler] = {
     "/setprovider": _cmd_setprovider,
     "/delprovider": _cmd_delprovider,
     "/setgithub": _cmd_setgithub,
+    "/setgithubtest": _cmd_setgithubtest,
     "/pushcode": _cmd_pushcode,
     "/editcode": _cmd_editcode,
     "/users": _cmd_users,
@@ -799,6 +854,7 @@ COMMANDS: dict[str, CommandHandler] = {
 _OWNER_ONLY_COMMANDS = {
     "/status", "/selftest", "/selftest_all",
     "/users", "/approve", "/deny", "/block",
+    "/cronsecret", "/cronreset",
 }
 
 

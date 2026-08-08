@@ -22,13 +22,19 @@ from config import config
 from core.logger import get_logger
 from llm.client import chat_completion, LLMError
 from llm import models as llm_models
+from llm import providers
 from storage.db import get_setting, set_setting
 
 log = get_logger(__name__)
 
 
 def _cache_key(chat_id: int | str) -> str:
-    return f"free_models_cache:{chat_id}"
+    # Профиль обязательно входит в ключ — иначе кэш от одного
+    # провайдера (например "default") продолжает отдаваться после
+    # /setprovider на другой профиль (например "clavis-aion-3.0"),
+    # хотя у него совсем другой список моделей и цен.
+    profile = providers.get_active_profile_name(chat_id)
+    return f"free_models_cache:{chat_id}:{profile}"
 
 
 _ANALYZE_SYSTEM = (

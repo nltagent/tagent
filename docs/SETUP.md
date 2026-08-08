@@ -11,7 +11,7 @@
 
 ```bash
 cp .env.example .env
-# заполните TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET, OWNER_CHAT_ID
+# заполните TELEGRAM_BOT_TOKEN, OWNER_CHAT_ID, PUBLIC_URL
 export $(cat .env | grep -v '^#' | xargs)
 cd src && python main.py
 ```
@@ -22,10 +22,40 @@ curl http://localhost:8080/health
 ```
 
 Локально Telegram не сможет достучаться до вашего компьютера напрямую
-(нет публичного URL) — полноценная проверка вебхука делается уже
-после деплоя на Railway. Для чисто локальной отладки логики можно
+(нет реального публичного URL) — полноценная проверка вебхука
+делается уже после деплоя. Для чисто локальной отладки логики можно
 вручную дёрнуть `/webhook` через curl, подставив свой
-`TELEGRAM_WEBHOOK_SECRET` и тело апдейта в формате Telegram Bot API.
+`TELEGRAM_WEBHOOK_SECRET` (см. ниже — можно не задавать вручную) и
+тело апдейта в формате Telegram Bot API.
+
+## Минимальный набор переменных
+
+По-настоящему обязательны только четыре: `TELEGRAM_BOT_TOKEN`,
+`OWNER_CHAT_ID`, `PUBLIC_URL` — без них бот не может стартовать и
+представиться Telegram. Если какой-то из них не хватает, контейнер
+сразу упадёт при старте с понятным сообщением вида `Не задана
+обязательная переменная окружения: OWNER_CHAT_ID` — это видно в логах
+деплоя, а не тонет где-то в рантайме.
+
+Всё остальное — необязательно:
+- **`TELEGRAM_WEBHOOK_SECRET`, `CRON_SECRET`** — если не заданы, бот
+  сам сгенерирует случайное значение при первом старте и сохранит
+  в SQLite (переживает рестарты, пока жив `DB_PATH`/Volume). Текущий
+  `CRON_SECRET` можно посмотреть командой `/cronsecret` (только
+  создатель) — он нужен, чтобы вписать его в переменные окружения
+  отдельного Cron Job сервиса.
+- **`LLM_API_KEY`/`LLM_BASE_URL`/`LLM_MODEL`** — это только профиль
+  `default` для владельца бота, короткий путь для тех, кто предпочитает
+  один ключ через переменные окружения. Можно вообще не задавать и
+  сразу после `/start` выполнить `/addprovider имя url ключ` прямо в
+  Telegram — тогда ключ никогда не попадает в переменные окружения
+  хостинга вовсе.
+- Регистрация вебхука у Telegram теперь происходит автоматически при
+  каждом старте контейнера (см. `main.py: _register_webhook()`) — за
+  счёт `PUBLIC_URL`, который уже обязателен. Ручной запуск
+  `scripts/set_webhook.py` остаётся, но нужен только для отладки —
+  например, если хочется перерегистрировать вебхук, не передеплоивая
+  контейнер целиком.
 
 ## Деплой бота на Railway
 
@@ -40,15 +70,16 @@ curl http://localhost:8080/health
    `docker/`.
 3. Settings → Networking → Generate Domain — получите публичный URL
    вида `https://<name>.up.railway.app`.
-4. Variables — задайте обязательные переменные (см. `.env.example`):
-   `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `OWNER_CHAT_ID`,
-   `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`, `CRON_SECRET`.
-   `PORT` Railway подставит сам.
+4. Variables — задайте обязательные переменные: `TELEGRAM_BOT_TOKEN`,
+   `OWNER_CHAT_ID`, `PUBLIC_URL` (тот самый домен из шага 3). `PORT`
+   Railway подставит сам. Остальное — по желанию (см. выше).
 5. Settings → Volumes — примонтируйте том на `/data` (путь из
    `DB_PATH`), иначе заметки/история/напоминания будут слетать при
-   каждом передеплое.
-6. После первого успешного деплоя — зарегистрируйте вебхук (с любой
-   машины с интернетом, включая свой ноутбук):
+   каждом передеплое — а заодно и авто-сгенерированные
+   `TELEGRAM_WEBHOOK_SECRET`/`CRON_SECRET`, если их не задать явно.
+6. Деплой — при старте бот сам зарегистрирует вебхук через
+   `PUBLIC_URL`, дополнительный шаг не нужен. Если хочется убедиться
+   вручную (или перерегистрировать после смены домена):
    ```bash
    PUBLIC_URL=https://<name>.up.railway.app \
    TELEGRAM_BOT_TOKEN=... \
@@ -56,7 +87,9 @@ curl http://localhost:8080/health
    python scripts/set_webhook.py
    ```
    Ответ должен содержать `"ok": true`.
-7. Напишите боту `/start` — должен ответить, список команд — `/help`.
+7. Напишите боту `/start`, затем `/addprovider имя url ключ`, если не
+   задавали `LLM_API_KEY`/`LLM_BASE_URL`/`LLM_MODEL` — список команд:
+   `/help`.
 8. (Необязательно) Меню команд рядом с полем ввода в Telegram:
    ```bash
    TELEGRAM_BOT_TOKEN=... python scripts/set_commands.py
@@ -102,8 +135,12 @@ curl -s "https://<публичный-домен-searxng>/search?q=test&format=js
 Нужен **третий** сервис в том же Railway-проекте (бот и SearxNG — уже
 два):
 
-1. Сгенерируйте секрет: `openssl rand -hex 32` → впишите в переменную
-   `CRON_SECRET` **сервиса бота** (и передеплойте бота).
+1. Узнайте текущий `CRON_SECRET`: напишите боту `/cronsecret` (только
+   создатель) — если переменную `CRON_SECRET` не задавали явно, бот
+   сам сгенерировал и сохранил её при первом старте, команда покажет
+   актуальное значение. Хотите задать вручную вместо авто-генерации —
+   впишите свой `openssl rand -hex 32` в переменную `CRON_SECRET`
+   **сервиса бота** и передеплойте бота.
 2. Railway → New → **Cron Job** (не Empty Service — именно тип Cron
    Job, это отдельный вариант в меню создания сервиса).
 3. Command:
@@ -127,10 +164,14 @@ curl -s "https://<публичный-домен-searxng>/search?q=test&format=js
 сервиса (`http://searxng:8080`) — Railway-домены тут ни при чём, это
 отдельный, локальный способ проверки перед реальным деплоем.
 
-1. Заполните `.env` реальными значениями (`TELEGRAM_BOT_TOKEN`,
-   `TELEGRAM_WEBHOOK_SECRET`, `OWNER_CHAT_ID`, `LLM_API_KEY`,
-   `LLM_BASE_URL`, `LLM_MODEL`, `CRON_SECRET`). `SEARXNG_BASE_URL`
-   можно не трогать — compose сам подставит `http://searxng:8080`.
+1. Заполните `.env` минимум `TELEGRAM_BOT_TOKEN`, `OWNER_CHAT_ID`,
+   `PUBLIC_URL` (для локальной проверки подойдёт заглушка вида
+   `http://localhost:8080` — просто чтобы конфиг загрузился, вебхук
+   всё равно локально не зарегистрируется по-настоящему). Остальное
+   (`TELEGRAM_WEBHOOK_SECRET`, `CRON_SECRET`, `LLM_API_KEY`/
+   `LLM_BASE_URL`/`LLM_MODEL`) можно не трогать — см. «Минимальный
+   набор переменных» выше. `SEARXNG_BASE_URL` тоже можно не трогать —
+   compose сам подставит `http://searxng:8080`.
 2. В терминале Codespaces:
    ```bash
    docker compose up --build

@@ -15,7 +15,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from config import config
 from telegram.router import handle_update
+from telegram.webhook_setup import register_webhook, WebhookSetupError
 from core.logger import get_logger
+from storage.db import get_or_create_secret
 import scheduler
 
 log = get_logger(__name__)
@@ -97,7 +99,44 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+def _resolve_secrets() -> None:
+    """TELEGRAM_WEBHOOK_SECRET/CRON_SECRET необязательны в окружении —
+    если не заданы явно, при первом старте генерируем случайное
+    значение и сохраняем в SQLite (settings), при следующих запусках
+    просто читаем то же самое оттуда. Мутируем сам объект config —
+    остальной код (main.py, router.py) читает config.WEBHOOK_SECRET/
+    config.CRON_SECRET как обычно, не зная, откуда взялось значение."""
+    if not config.WEBHOOK_SECRET:
+        config.WEBHOOK_SECRET = get_or_create_secret("telegram_webhook_secret")
+        log.info("TELEGRAM_WEBHOOK_SECRET не задан в окружении — сгенерирован и сохранён в БД")
+    if not config.CRON_SECRET:
+        config.CRON_SECRET = get_or_create_secret("cron_secret")
+        log.info("CRON_SECRET не задан в окружении — сгенерирован и сохранён в БД (см. /cronsecret)")
+
+
+def _register_webhook() -> None:
+    """Сообщаем Telegram текущий публичный адрес при каждом старте —
+    не смертельно, если не получилось (например, временно недоступен
+    api.telegram.org): логируем и продолжаем поднимать сервер, а не
+    падаем — бот может быть уже зарегистрирован с прошлого раза."""
+    try:
+        register_webhook(
+            bot_token=config.BOT_TOKEN,
+            public_url=config.PUBLIC_URL,
+            webhook_secret=config.WEBHOOK_SECRET,
+            webhook_path=config.WEBHOOK_PATH,
+        )
+        log.info("Вебхук зарегистрирован: %s%s", config.PUBLIC_URL, config.WEBHOOK_PATH)
+    except WebhookSetupError:
+        log.exception(
+            "Не удалось зарегистрировать вебхук при старте — продолжаю запуск сервера, "
+            "но Telegram может не знать текущий адрес. Проверьте вручную: scripts/set_webhook.py"
+        )
+
+
 def main():
+    _resolve_secrets()
+    _register_webhook()
     server = ThreadingHTTPServer(("0.0.0.0", config.PORT), Handler)
     log.info("Слушаю на порту %s, webhook path=%s", config.PORT, config.WEBHOOK_PATH)
     try:
