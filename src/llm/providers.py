@@ -31,6 +31,15 @@ class ProviderError(RuntimeError):
     pass
 
 
+def _default_profile_configured() -> bool:
+    """Профиль "default" (переменные окружения LLM_API_KEY/LLM_BASE_URL/
+    LLM_MODEL) теперь необязателен — считается настроенным, только
+    если заданы ВСЕ ТРИ. Частично заданные переменные (например, ключ
+    без модели) намеренно тоже считаются "не настроен", а не падают
+    отдельной непонятной ошибкой на середине запроса."""
+    return bool(config.LLM_API_KEY and config.LLM_BASE_URL and config.LLM_MODEL)
+
+
 def _profiles_key(chat_id: int | str) -> str:
     return f"llm_provider_profiles:{chat_id}"
 
@@ -81,12 +90,13 @@ def remove_profile(chat_id: int | str, name: str) -> bool:
 
 def _fallback_profile(chat_id: int | str) -> str:
     """Профиль, на который переключаемся, когда активный удалён (или
-    ещё не выбирался). Для создателя — "default" (его ключ из .env);
-    для всех остальных "default" недоступен ни при каких условиях —
-    им остаётся первый из собственных добавленных профилей, либо
-    пустая строка, если профилей вообще нет (тогда любой вызов LLM
-    вернёт понятную ошибку с просьбой /addprovider)."""
-    if users_service.is_owner(chat_id):
+    ещё не выбирался). Для создателя — "default", НО только если он
+    реально настроен через переменные окружения (см.
+    _default_profile_configured); иначе, как и для всех остальных
+    пользователей, остаётся первый из собственных добавленных
+    профилей, либо пустая строка, если профилей вообще нет (тогда
+    любой вызов LLM вернёт понятную ошибку с просьбой /addprovider)."""
+    if users_service.is_owner(chat_id) and _default_profile_configured():
         return DEFAULT_PROFILE_NAME
     own = list(_load_profiles(chat_id).keys())
     return own[0] if own else ""
@@ -94,7 +104,7 @@ def _fallback_profile(chat_id: int | str) -> str:
 
 def list_profile_names(chat_id: int | str) -> list[str]:
     own = list(_load_profiles(chat_id).keys())
-    if users_service.is_owner(chat_id):
+    if users_service.is_owner(chat_id) and _default_profile_configured():
         return [DEFAULT_PROFILE_NAME] + own
     return own
 
@@ -129,6 +139,12 @@ def get_credentials_for(chat_id: int | str, name: str) -> tuple[str, str]:
             raise ProviderError(
                 "Профиль «default» доступен только создателю бота — "
                 "добавьте свой профиль: /addprovider имя url ключ"
+            )
+        if not _default_profile_configured():
+            raise ProviderError(
+                "Профиль «default» не настроен — в переменных окружения нет "
+                "полного набора LLM_API_KEY/LLM_BASE_URL/LLM_MODEL. Либо задайте "
+                "все три, либо просто используйте /addprovider имя url ключ."
             )
         return config.LLM_BASE_URL, config.LLM_API_KEY
     profile = _load_profiles(chat_id).get(name)

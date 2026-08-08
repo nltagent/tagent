@@ -17,20 +17,37 @@ def _require(name: str) -> str:
 
 
 class Config:
+    # ── По-настоящему обязательные при деплое (без них бот не может ──
+    # ── даже стартовать/представиться Telegram) ──────────────────────
+
     # Токен бота, выданный @BotFather
     BOT_TOKEN: str = _require("TELEGRAM_BOT_TOKEN")
+
+    # chat_id владельца — единственного, кому бот будет отвечать на первом
+    # этапе. Узнать свой chat_id можно, написав боту и посмотрев логи,
+    # либо через @userinfobot. Обязателен: без него бот не может решить,
+    # кому доверять при самой первой команде.
+    OWNER_CHAT_ID: str = _require("OWNER_CHAT_ID")
+
+    # Публичный домен, который выдал хостинг (Railway/Render — Settings
+    # -> Networking), БЕЗ пути и БЕЗ слэша на конце, например:
+    #   https://my-bot.up.railway.app
+    # Нужен, чтобы бот сам зарегистрировал вебхук у Telegram при
+    # старте (см. main.py: register_webhook()) — вручную гонять
+    # scripts/set_webhook.py после каждого деплоя больше не нужно.
+    PUBLIC_URL: str = _require("PUBLIC_URL")
+
+    # ── Секреты, которые НЕ обязательно задавать руками — если ───────
+    # ── переменная пуста, бот сам сгенерирует случайное значение при ─
+    # ── первом старте и запомнит его в SQLite (см. main.py) ──────────
 
     # Секрет, который Telegram будет присылать в заголовке
     # X-Telegram-Bot-Api-Secret-Token — так мы отличаем реальные запросы
     # от Telegram от любых случайных POST-запросов на наш публичный URL.
-    WEBHOOK_SECRET: str = _require("TELEGRAM_WEBHOOK_SECRET")
+    # Пусто = main.py сгенерирует и сохранит в settings при старте.
+    WEBHOOK_SECRET: str = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
 
-    # chat_id владельца — единственного, кому бот будет отвечать на первом
-    # этапе. Узнать свой chat_id можно, написав боту и посмотрев логи,
-    # либо через @userinfobot.
-    OWNER_CHAT_ID: str = _require("OWNER_CHAT_ID")
-
-    # Railway сам прокидывает PORT — на него нужно слушать.
+    # Railway/Render сами прокидывают PORT — на него нужно слушать.
     PORT: int = int(os.environ.get("PORT", "8080"))
 
     # Путь, на который будет приходить вебхук. Не обязателен к изменению,
@@ -52,7 +69,15 @@ class Config:
     HISTORY_TOKEN_BUDGET: int = int(os.environ.get("HISTORY_TOKEN_BUDGET", "3000"))
 
     # ── LLM (OpenRouter / clavis.to / любой OpenAI-совместимый шлюз) ──
-    LLM_API_KEY: str = _require("LLM_API_KEY")
+    # Необязательны: это только профиль "default" для владельца бота
+    # (см. llm/providers.py) — по сути ярлык для тех, кто предпочитает
+    # один ключ через переменные окружения. Любой пользователь (включая
+    # владельца) может вместо этого добавить себе провайдера прямо в
+    # Telegram командой /addprovider — тогда эти три переменные можно
+    # вообще не задавать. Если задана только часть из трёх — профиль
+    # "default" считается ненастроенным (см. providers.py), а не падает
+    # с ошибкой при старте контейнера.
+    LLM_API_KEY: str = os.environ.get("LLM_API_KEY", "")
 
     # Полный базовый URL БЕЗ /chat/completions на конце, например:
     #   OpenRouter:  https://openrouter.ai/api/v1
@@ -60,13 +85,12 @@ class Config:
     #                на момент написания этого кода у меня нет
     #                подтверждённого публичного адреса их API, поэтому
     #                значение по умолчанию не задаю намеренно.
-    LLM_BASE_URL: str = _require("LLM_BASE_URL")
+    LLM_BASE_URL: str = os.environ.get("LLM_BASE_URL", "")
 
     # Конкретная модель, например "deepseek/deepseek-chat-v3-0324:free"
-    # для OpenRouter. Указывается явно, без дефолта — списки доступных
-    # моделей и их актуальные идентификаторы меняются слишком часто,
-    # чтобы зашивать их в код.
-    LLM_MODEL: str = _require("LLM_MODEL")
+    # для OpenRouter. Списки доступных моделей и их актуальные
+    # идентификаторы меняются слишком часто, чтобы зашивать дефолт.
+    LLM_MODEL: str = os.environ.get("LLM_MODEL", "")
 
     # Лимиты запросов к LLM. Для OpenRouter :free-моделей — не больше
     # 20/мин было актуально на момент написания; для других
@@ -122,9 +146,12 @@ class Config:
     USER_TIMEZONE: str = os.environ.get("USER_TIMEZONE", "Europe/Amsterdam")
 
     # Секрет для внутреннего эндпоинта /internal/cron, который дёргает
-    # Railway Cron Job (см. README) — не путать с TELEGRAM_WEBHOOK_SECRET,
-    # это разные вызовы с разными источниками.
-    CRON_SECRET: str = _require("CRON_SECRET")
+    # Cron Job хостинга (см. README) — не путать с TELEGRAM_WEBHOOK_SECRET,
+    # это разные вызовы с разными источниками. Пусто = main.py сам
+    # сгенерирует и сохранит в settings при старте — актуальное
+    # значение можно посмотреть командой /cronsecret (только владелец),
+    # чтобы вписать его в переменные окружения отдельного Cron Job сервиса.
+    CRON_SECRET: str = os.environ.get("CRON_SECRET", "")
 
     # Не чаще раза в столько часов слать отчёт о нагрузке сервера, даже
     # если cron дёргает эндпоинт чаще (нужно чаще ради своевременности
